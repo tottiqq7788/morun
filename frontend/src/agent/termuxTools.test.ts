@@ -21,7 +21,7 @@ describe('termux tool catalog', () => {
       command: 'termux-vibrate',
       args: ['-d', '5000'],
     })
-    expect(termuxCommandForTool('termux_contacts_messages', { action: 'sms_list', limit: 500 })).toMatchObject({
+    expect(termuxCommandForTool('termux_messages', { action: 'sms_list', limit: 500 })).toMatchObject({
       command: 'termux-sms-list',
       args: ['-l', '50'],
     })
@@ -36,9 +36,17 @@ describe('termux tool catalog', () => {
       requiresConfirmation: true,
       confirmationPolicy: 'confirm',
     })
-    expect(tools.find((tool) => tool.name === 'termux_contacts_messages')).toMatchObject({
+    expect(tools.find((tool) => tool.name === 'termux_contacts')).toMatchObject({
       enabled: false,
       riskLevel: 'high',
+      permission: 'contacts',
+      requiresConfirmation: true,
+      confirmationPolicy: 'confirm',
+    })
+    expect(tools.find((tool) => tool.name === 'termux_messages')).toMatchObject({
+      enabled: false,
+      riskLevel: 'high',
+      permission: 'sms',
       requiresConfirmation: true,
       confirmationPolicy: 'confirm',
     })

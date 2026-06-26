@@ -3,8 +3,6 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import {
   CheckCircle2,
   CircleAlert,
-  ClipboardCopy,
-  ExternalLink,
   LoaderCircle,
   Menu,
   MessageSquare,
@@ -13,12 +11,11 @@ import {
   Save,
   Send,
   Settings,
-  Smartphone,
   Square,
-  Terminal,
   Trash2,
   X,
 } from '@lucide/vue'
+import TermuxEnvironmentCard from './components/TermuxEnvironmentCard.vue'
 import { createChatCompletionClient } from './agent/chatTransport'
 import { runAgentTurn, type ToolConfirmationDecision } from './agent/runtime'
 import { createToolRegistry } from './agent/toolRegistry'
@@ -32,7 +29,7 @@ import type {
   ToolRiskLevel,
   ToolSource,
 } from './agent/types'
-import { morunNativeBridge, type TermuxStatus } from './native/morunNative'
+import { morunNativeBridge } from './native/morunNative'
 import {
   accountDisplayName,
   accountModels,
@@ -79,13 +76,6 @@ interface PendingToolConfirmation {
   resolve: (decision: ToolConfirmationDecision) => void
 }
 
-type TermuxDiagnosticState = 'idle' | 'running' | 'ready' | 'package_missing' | 'error'
-
-interface TermuxDiagnostic {
-  state: TermuxDiagnosticState
-  text: string
-}
-
 const chatStore = useChatStore()
 const {
   modelConfig,
@@ -122,16 +112,6 @@ const connectionStatus = ref<ConnectionStatus>({
   state: 'idle',
   text: '尚未测试连接。',
 })
-const termuxStatus = ref<TermuxStatus | null>(null)
-const termuxDiagnostic = ref<TermuxDiagnostic>({
-  state: 'idle',
-  text: '尚未运行诊断。',
-})
-const isCheckingTermux = ref(false)
-const isRunningTermuxDiagnostic = ref(false)
-const termuxSetupCopied = ref(false)
-const termuxSetupCommand =
-  "mkdir -p ~/.termux && (grep -qxF 'allow-external-apps=true' ~/.termux/termux.properties 2>/dev/null || echo 'allow-external-apps=true' >> ~/.termux/termux.properties) && pkg update && pkg install -y termux-api"
 
 const draftProvider = computed(() => {
   return getProviderById(accountDraft.value.providerId)
@@ -145,7 +125,6 @@ onMounted(async () => {
   if (await migrateModelAccountSecrets(modelConfig.value, nativeBridge)) {
     chatStore.saveConfig()
   }
-  await refreshTermuxStatus()
 })
 
 function createSession() {
@@ -226,82 +205,6 @@ function updateDraftProvider() {
     state: 'idle',
     text: '尚未测试连接。',
   }
-}
-
-async function refreshTermuxStatus() {
-  isCheckingTermux.value = true
-  try {
-    termuxStatus.value = await nativeBridge.termuxStatus()
-  } finally {
-    isCheckingTermux.value = false
-  }
-}
-
-async function openTermuxInstallPage() {
-  await nativeBridge.openTermuxInstallPage()
-}
-
-async function openTermuxApiInstallPage() {
-  await nativeBridge.openTermuxApiInstallPage()
-}
-
-async function openTermuxApp() {
-  await nativeBridge.openTermuxApp()
-}
-
-async function runTermuxDiagnostic() {
-  isRunningTermuxDiagnostic.value = true
-  termuxDiagnostic.value = {
-    state: 'running',
-    text: '正在读取电池状态。',
-  }
-
-  try {
-    await refreshTermuxStatus()
-    const status = termuxStatus.value
-    if (status?.termuxInstalled && !status.runCommandPermissionGranted) {
-      termuxStatus.value = await nativeBridge.requestTermuxRunCommandPermission()
-    }
-
-    const authorizedStatus = termuxStatus.value
-    if (!authorizedStatus?.canRunCommands) {
-      termuxDiagnostic.value = {
-        state: 'error',
-        text: authorizedStatus?.message || 'Termux RUN_COMMAND 尚未就绪。',
-      }
-      return
-    }
-
-    const result = await nativeBridge.runTermuxCommand({
-      requestId: `termux_diagnostic_${Date.now()}`,
-      command: 'termux-battery-status',
-      timeoutMs: 15000,
-    })
-
-    if (result.exitCode === 0) {
-      termuxDiagnostic.value = {
-        state: 'ready',
-        text: 'Termux:API 命令可用。',
-      }
-      return
-    }
-
-    const detail = `${result.stderr}\n${result.stdout}\n${result.errmsg ?? ''}`.toLowerCase()
-    termuxDiagnostic.value = {
-      state: detail.includes('not found') || detail.includes('no such file') ? 'package_missing' : 'error',
-      text: detail.includes('not found') || detail.includes('no such file') ? 'Termux 内未安装 termux-api 包。' : 'Termux 诊断命令执行失败。',
-    }
-  } finally {
-    isRunningTermuxDiagnostic.value = false
-  }
-}
-
-async function copyTermuxSetupCommand() {
-  await navigator.clipboard?.writeText(termuxSetupCommand)
-  termuxSetupCopied.value = true
-  window.setTimeout(() => {
-    termuxSetupCopied.value = false
-  }, 1800)
 }
 
 async function testDraftConnection() {
@@ -753,40 +656,6 @@ function setToolPolicy(
 
 function isToolConfirmationPolicy(value: unknown): value is ToolConfirmationPolicy {
   return value === 'auto' || value === 'confirm' || value === 'deny'
-}
-
-function termuxStatusLabel() {
-  const status = termuxStatus.value
-  if (!status) return '检测中'
-  if (!status.available && status.message.includes('仅 Android')) return '不可用'
-  if (!status.termuxInstalled) return '未安装 Termux'
-  if (!status.runCommandPermissionGranted) return '未授权 RUN_COMMAND'
-  if (!status.termuxApiInstalled) return '未安装 Termux:API'
-  if (!status.available) return '不可用'
-  if (termuxDiagnostic.value.state === 'package_missing') return '未安装 termux-api 包'
-  if (termuxDiagnostic.value.state === 'ready') return '已就绪'
-  return '待初始化'
-}
-
-function termuxStatusDescription() {
-  const status = termuxStatus.value
-  if (!status) return '正在检测 Android 执行环境。'
-  if (!status.available && status.message.includes('仅 Android')) return status.message
-  if (!status.termuxInstalled) return '需要先安装 Termux。'
-  if (!status.runCommandPermissionGranted) return '需要允许 morun 调用 Termux RUN_COMMAND。'
-  if (!status.termuxApiInstalled) return '手机能力工具需要安装 Termux:API app。'
-  if (!status.available) return status.message
-  if (termuxDiagnostic.value.state !== 'idle') return termuxDiagnostic.value.text
-  return '运行诊断可确认 Termux 内的 termux-api 包是否可用。'
-}
-
-function termuxStatusTone() {
-  const status = termuxStatus.value
-  if (status?.canRunCommands && status.termuxApiInstalled && termuxDiagnostic.value.state === 'ready') return 'ready'
-  if (termuxDiagnostic.value.state === 'running' || isCheckingTermux.value) return 'checking'
-  if (!status?.available || !status.termuxInstalled || !status.runCommandPermissionGranted || !status.termuxApiInstalled) return 'blocked'
-  if (termuxDiagnostic.value.state === 'package_missing' || termuxDiagnostic.value.state === 'error') return 'blocked'
-  return 'pending'
 }
 
 function toolSourceLabel(source: ToolSource) {
@@ -1331,50 +1200,7 @@ function adjustComposerHeight() {
           <p v-else class="empty-copy">还没有模型配置。添加后可以在对话顶部切换厂商和模型。</p>
         </section>
 
-        <section class="settings-section">
-          <div class="section-heading">
-            <h3>Termux 执行环境</h3>
-            <span :class="['termux-status-pill', termuxStatusTone()]">{{ termuxStatusLabel() }}</span>
-          </div>
-
-          <div class="termux-card">
-            <div class="termux-status-row">
-              <Smartphone :size="18" />
-              <span>{{ termuxStatusDescription() }}</span>
-            </div>
-
-            <div class="termux-actions">
-              <button class="secondary-button compact" type="button" @click="openTermuxInstallPage">
-                <ExternalLink :size="15" />
-                Termux
-              </button>
-              <button class="secondary-button compact" type="button" @click="openTermuxApiInstallPage">
-                <ExternalLink :size="15" />
-                Termux:API
-              </button>
-              <button class="secondary-button compact" type="button" @click="openTermuxApp">
-                <Terminal :size="15" />
-                打开
-              </button>
-              <button
-                class="secondary-button compact"
-                type="button"
-                :disabled="isCheckingTermux || isRunningTermuxDiagnostic"
-                @click="runTermuxDiagnostic"
-              >
-                <LoaderCircle v-if="isRunningTermuxDiagnostic" class="spin" :size="15" />
-                <RefreshCw v-else :size="15" />
-                诊断
-              </button>
-              <button class="secondary-button compact" type="button" @click="copyTermuxSetupCommand">
-                <ClipboardCopy :size="15" />
-                {{ termuxSetupCopied ? '已复制' : '初始化命令' }}
-              </button>
-            </div>
-
-            <code class="termux-command">{{ termuxSetupCommand }}</code>
-          </div>
-        </section>
+        <TermuxEnvironmentCard />
 
         <section class="settings-section">
           <div class="section-heading">

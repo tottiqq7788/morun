@@ -37,7 +37,7 @@ import java.util.concurrent.Future;
 public class MorunNativePlugin extends Plugin {
 
     private static final String SECURE_PREFS_NAME = "morun_secure_store";
-    private static final String VERSION = "0.4.0";
+    private static final String VERSION = "0.5.1";
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final Map<String, HttpURLConnection> activeConnections = new ConcurrentHashMap<>();

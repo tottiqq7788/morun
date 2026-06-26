@@ -12,7 +12,8 @@ const notifyActions = ['toast', 'vibrate', 'notification', 'tts_speak'] as const
 const locationProviders = ['gps', 'network', 'passive'] as const
 const mediaCaptureActions = ['camera_photo', 'microphone_record'] as const
 const contactActions = ['list'] as const
-const messageActions = ['sms_list', 'call_log'] as const
+const messageActions = ['sms_list'] as const
+const callLogActions = ['list'] as const
 
 export type TermuxToolName =
   | 'termux_device_status'
@@ -22,6 +23,7 @@ export type TermuxToolName =
   | 'termux_media_capture'
   | 'termux_contacts'
   | 'termux_messages'
+  | 'termux_call_log'
 
 export function createTermuxTools(nativeBridge: MorunNativeBridge): ToolDefinition[] {
   return [
@@ -163,7 +165,7 @@ export function createTermuxTools(nativeBridge: MorunNativeBridge): ToolDefiniti
     },
     {
       name: 'termux_messages',
-      description: '读取短信列表或通话记录，默认关闭。',
+      description: '读取短信列表，默认关闭。',
       source: 'termux',
       riskLevel: 'high',
       permission: 'sms',
@@ -172,7 +174,7 @@ export function createTermuxTools(nativeBridge: MorunNativeBridge): ToolDefiniti
       confirmationPolicy: 'confirm',
       parameters: objectSchema(
         {
-          action: enumSchema(messageActions, '短信和通话记录动作。'),
+          action: enumSchema(messageActions, '短信动作。'),
           limit: {
             type: 'number',
             description: '返回条数，范围 1 到 50。',
@@ -183,6 +185,29 @@ export function createTermuxTools(nativeBridge: MorunNativeBridge): ToolDefiniti
         ['action'],
       ),
       execute: async (args) => executeTermuxTool(nativeBridge, 'termux_messages', termuxCommandForTool('termux_messages', args)),
+    },
+    {
+      name: 'termux_call_log',
+      description: '读取通话记录，默认关闭。',
+      source: 'termux',
+      riskLevel: 'high',
+      permission: 'call_log',
+      enabled: false,
+      requiresConfirmation: true,
+      confirmationPolicy: 'confirm',
+      parameters: objectSchema(
+        {
+          action: enumSchema(callLogActions, '通话记录动作。'),
+          limit: {
+            type: 'number',
+            description: '返回条数，范围 1 到 50。',
+            minimum: 1,
+            maximum: 50,
+          },
+        },
+        ['action'],
+      ),
+      execute: async (args) => executeTermuxTool(nativeBridge, 'termux_call_log', termuxCommandForTool('termux_call_log', args)),
     },
   ]
 }
@@ -264,9 +289,14 @@ export function termuxCommandForTool(toolName: TermuxToolName, args: unknown): T
     return { command: 'termux-contact-list', timeoutMs: 20000 }
   }
 
-  const action = parseEnum(record.action, messageActions, 'action')
+  if (toolName === 'termux_messages') {
+    parseEnum(record.action, messageActions, 'action')
+    const limit = String(parseInteger(record.limit ?? 10, 'limit', 1, 50))
+    return { command: 'termux-sms-list', args: ['-l', limit], timeoutMs: 20000 }
+  }
+
+  parseEnum(record.action, callLogActions, 'action')
   const limit = String(parseInteger(record.limit ?? 10, 'limit', 1, 50))
-  if (action === 'sms_list') return { command: 'termux-sms-list', args: ['-l', limit], timeoutMs: 20000 }
   return { command: 'termux-call-log', args: ['-l', limit], timeoutMs: 20000 }
 }
 

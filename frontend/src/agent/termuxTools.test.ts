@@ -25,9 +25,13 @@ describe('termux tool catalog', () => {
       command: 'termux-sms-list',
       args: ['-l', '50'],
     })
+    expect(termuxCommandForTool('termux_call_log', { action: 'list', limit: -10 })).toMatchObject({
+      command: 'termux-call-log',
+      args: ['-l', '1'],
+    })
   })
 
-  it('marks high-risk phone data tools as confirm-only and disables contacts/messages by default', () => {
+  it('marks high-risk phone data tools as confirm-only and disables contacts/messages/call log by default', () => {
     const tools = createTermuxTools(createBridge())
     expect(tools.find((tool) => tool.name === 'termux_location')).toMatchObject({
       source: 'termux',
@@ -47,6 +51,13 @@ describe('termux tool catalog', () => {
       enabled: false,
       riskLevel: 'high',
       permission: 'sms',
+      requiresConfirmation: true,
+      confirmationPolicy: 'confirm',
+    })
+    expect(tools.find((tool) => tool.name === 'termux_call_log')).toMatchObject({
+      enabled: false,
+      riskLevel: 'high',
+      permission: 'call_log',
       requiresConfirmation: true,
       confirmationPolicy: 'confirm',
     })

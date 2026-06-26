@@ -1,21 +1,17 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
-  CheckCircle2,
-  CircleAlert,
-  LoaderCircle,
-  Menu,
   MessageSquare,
   Plus,
   RefreshCw,
   Save,
-  Send,
-  Settings,
-  Square,
   Trash2,
   X,
 } from '@lucide/vue'
+import ChatMainPanel from './components/ChatMainPanel.vue'
 import TermuxEnvironmentCard from './components/TermuxEnvironmentCard.vue'
+import ToolCatalogSection, { type ToolPolicyUpdate } from './components/ToolCatalogSection.vue'
+import ToolConfirmationDialog from './components/ToolConfirmationDialog.vue'
 import { createChatCompletionClient } from './agent/chatTransport'
 import { runAgentTurn, type ToolConfirmationDecision } from './agent/runtime'
 import { createToolRegistry } from './agent/toolRegistry'
@@ -25,9 +21,6 @@ import type {
   ToolCall,
   ToolConfirmationPolicy,
   ToolDefinition,
-  ToolPermission,
-  ToolRiskLevel,
-  ToolSource,
 } from './agent/types'
 import { morunNativeBridge } from './native/morunNative'
 import {
@@ -39,7 +32,6 @@ import {
   createId,
   createUserMessage,
   getProviderById,
-  makeModelValue,
   normalizeModels,
   providerPresets,
   trimTrailingSlash,
@@ -95,7 +87,6 @@ const toolPolicy = ref(loadToolPolicy())
 const toolRegistry = computed(() => createToolRegistry({ storage: localStorage, nativeBridge }, toolPolicy.value))
 const agentTools = computed(() => toolRegistry.value.tools)
 const catalogTools = computed(() => toolRegistry.value.catalogTools)
-const toolCatalogGroups = computed(() => groupToolCatalog(catalogTools.value))
 const draft = ref('')
 const configOpen = ref(false)
 const sidebarOpen = ref(false)
@@ -105,9 +96,7 @@ const isGenerating = ref(false)
 const isTestingConnection = ref(false)
 const activeAbortController = ref<AbortController | null>(null)
 const pendingToolConfirmation = ref<PendingToolConfirmation | null>(null)
-const messagesEnd = ref<HTMLElement | null>(null)
-const composerTextarea = ref<HTMLTextAreaElement | null>(null)
-const modelSelect = ref<HTMLSelectElement | null>(null)
+const chatPanel = ref<InstanceType<typeof ChatMainPanel> | null>(null)
 const connectionStatus = ref<ConnectionStatus>({
   state: 'idle',
   text: '尚未测试连接。',
@@ -291,14 +280,6 @@ async function saveAccountDraft() {
   modelConfig.value.accounts.push(accountWithSecret)
   modelConfig.value.activeAccountId = accountWithSecret.id
   accountDialogOpen.value = false
-}
-
-function openModelSelect() {
-  const select = modelSelect.value
-  if (!select || !modelConfig.value.accounts.length) return
-
-  select.focus()
-  select.showPicker?.()
 }
 
 async function sendMessage() {
@@ -597,43 +578,6 @@ function pendingToolArgs() {
   return stringifyCompact(pendingToolConfirmation.value?.toolCall.arguments)
 }
 
-function groupToolCatalog(tools: ToolDefinition[]) {
-  const groups = new Map<ToolSource, ToolDefinition[]>()
-  for (const tool of tools) {
-    groups.set(tool.source, [...(groups.get(tool.source) ?? []), tool])
-  }
-
-  return Array.from(groups.entries()).map(([source, items]) => ({
-    key: source,
-    title: toolSourceLabel(source),
-    tools: items.sort((left, right) => left.riskLevel.localeCompare(right.riskLevel) || left.name.localeCompare(right.name)),
-  }))
-}
-
-function enabledToolCount() {
-  return catalogTools.value.filter((tool) => tool.enabled !== false && tool.confirmationPolicy !== 'deny').length
-}
-
-function toolCatalogTitle(tool: ToolDefinition) {
-  return toolRegistry.value.getTitle(tool.name)
-}
-
-function handleToolEnabledChange(toolName: string, event: Event) {
-  const target = event.target as HTMLInputElement | null
-  setToolPolicy(toolName, {
-    enabled: Boolean(target?.checked),
-  })
-}
-
-function handleToolConfirmationPolicyChange(toolName: string, event: Event) {
-  const target = event.target as HTMLSelectElement | null
-  if (!isToolConfirmationPolicy(target?.value)) return
-
-  setToolPolicy(toolName, {
-    confirmationPolicy: target.value,
-  })
-}
-
 function setToolPolicy(
   toolName: string,
   patch: {
@@ -654,55 +598,14 @@ function setToolPolicy(
   saveToolPolicy(toolPolicy.value)
 }
 
-function isToolConfirmationPolicy(value: unknown): value is ToolConfirmationPolicy {
-  return value === 'auto' || value === 'confirm' || value === 'deny'
-}
-
-function toolSourceLabel(source: ToolSource) {
-  const labels: Record<ToolSource, string> = {
-    builtin: '内置工具',
-    native: '原生工具',
-    termux: 'Termux 工具',
-    mcp: 'MCP 工具',
-    plugin: '插件工具',
-  }
-  return labels[source]
-}
-
-function toolRiskLabel(riskLevel: ToolRiskLevel) {
-  const labels: Record<ToolRiskLevel, string> = {
-    safe: '安全',
-    low: '低风险',
-    medium: '中风险',
-    high: '高风险',
-  }
-  return labels[riskLevel]
-}
-
-function toolPermissionLabel(permission: ToolPermission) {
-  const labels: Record<ToolPermission, string> = {
-    camera: '相机/录音',
-    clipboard: '剪贴板',
-    contacts: '联系人',
-    none: '无权限',
-    external_app: '外部应用',
-    location: '定位',
-    local_storage: '本地存储',
-    network: '网络',
-    notification: '通知',
-    secret: '密钥',
-    sms: '短信',
-  }
-  return labels[permission]
-}
-
-function toolConfirmationPolicyLabel(policy: ToolConfirmationPolicy) {
-  const labels: Record<ToolConfirmationPolicy, string> = {
-    auto: '自动',
-    confirm: '每次确认',
-    deny: '拒绝',
-  }
-  return labels[policy]
+function handleToolPolicyUpdate(update: ToolPolicyUpdate) {
+  const patch: {
+    enabled?: boolean
+    confirmationPolicy?: ToolConfirmationPolicy
+  } = {}
+  if ('enabled' in update) patch.enabled = update.enabled
+  if ('confirmationPolicy' in update) patch.confirmationPolicy = update.confirmationPolicy
+  setToolPolicy(update.toolName, patch)
 }
 
 function toolSubtitle(message: ChatMessage) {
@@ -934,19 +837,11 @@ function formatTime(value: number) {
 }
 
 function scheduleScroll() {
-  nextTick(() => {
-    messagesEnd.value?.scrollIntoView({ block: 'end' })
-  })
+  chatPanel.value?.scrollToEnd()
 }
 
 function adjustComposerHeight() {
-  nextTick(() => {
-    const textarea = composerTextarea.value
-    if (!textarea) return
-
-    textarea.style.height = 'auto'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`
-  })
+  chatPanel.value?.adjustComposerHeight()
 }
 </script>
 
@@ -989,176 +884,37 @@ function adjustComposerHeight() {
       </nav>
     </aside>
 
-    <section class="chat-panel">
-      <header class="chat-header">
-        <button
-          class="icon-button menu-button"
-          type="button"
-          aria-label="切换会话列表"
-          title="切换会话列表"
-          @click="sidebarOpen = !sidebarOpen"
-        >
-          <Menu :size="19" />
-        </button>
+    <ChatMainPanel
+      ref="chatPanel"
+      v-model:draft="draft"
+      v-model:active-model-value="activeModelValue"
+      :active-session="activeSession"
+      :has-messages="hasMessages"
+      :active-model-label="activeModelLabel"
+      :active-model-initial="activeModelInitial"
+      :model-accounts="modelConfig.accounts"
+      :is-generating="isGenerating"
+      :format-time="formatTime"
+      :render-markdown="renderMarkdown"
+      :tool-display-title="toolDisplayTitle"
+      :tool-subtitle="toolSubtitle"
+      :tool-status-summary="toolStatusSummary"
+      :has-tool-details="hasToolDetails"
+      :format-tool-args="formatToolArgs"
+      :format-tool-output="formatToolOutput"
+      @toggle-sidebar="sidebarOpen = !sidebarOpen"
+      @open-settings="configOpen = true"
+      @send-message="sendMessage"
+      @stop-generation="stopGeneration"
+    />
 
-        <div class="chat-title">
-          <h2>{{ activeSession?.title ?? '对话' }}</h2>
-          <div class="chat-subtitle">
-            <span>{{ activeSession ? formatTime(activeSession.updatedAt) : '' }}</span>
-          </div>
-        </div>
-
-        <div class="header-actions">
-          <button class="icon-button" type="button" aria-label="模型设置" title="模型设置" @click="configOpen = true">
-            <Settings :size="18" />
-          </button>
-        </div>
-      </header>
-
-      <div class="message-scroll">
-        <section v-if="!hasMessages" class="empty-state">
-          <MessageSquare :size="36" />
-          <h3>开始对话</h3>
-          <p>{{ activeModelLabel }}</p>
-        </section>
-
-        <article
-          v-for="message in activeSession?.messages"
-          :key="message.id"
-          :class="['message-row', message.role]"
-        >
-          <div v-if="message.role === 'tool'" :class="['tool-card', message.toolStatus]">
-            <div class="tool-card-header">
-              <span :class="['tool-state-icon', message.toolStatus]">
-                <LoaderCircle v-if="message.toolStatus === 'running'" :size="16" />
-                <CircleAlert v-else-if="message.toolStatus === 'error'" :size="16" />
-                <CheckCircle2 v-else :size="16" />
-              </span>
-              <span class="tool-title">
-                <strong>{{ toolDisplayTitle(message) }}</strong>
-                <small>{{ toolSubtitle(message) }}</small>
-              </span>
-              <span class="tool-status">{{ toolStatusSummary(message) }}</span>
-            </div>
-            <details v-if="hasToolDetails(message)" class="tool-details" :open="message.toolStatus === 'error'">
-              <summary>调用详情</summary>
-              <div v-if="formatToolArgs(message)" class="tool-detail-block">
-                <span>参数</span>
-                <pre>{{ formatToolArgs(message) }}</pre>
-              </div>
-              <div v-if="formatToolOutput(message)" class="tool-detail-block">
-                <span>{{ message.toolStatus === 'error' ? '错误' : '结果' }}</span>
-                <pre>{{ formatToolOutput(message) }}</pre>
-              </div>
-            </details>
-          </div>
-          <div v-else class="message-bubble">
-            <div
-              class="markdown-body"
-              v-html="renderMarkdown(message.content || (message.status === 'streaming' ? '正在思考...' : ''))"
-            />
-            <small v-if="message.error" class="message-error">{{ message.error }}</small>
-          </div>
-        </article>
-        <div ref="messagesEnd" />
-      </div>
-
-      <footer class="composer">
-        <div class="composer-input">
-          <textarea
-            ref="composerTextarea"
-            v-model="draft"
-            rows="1"
-            placeholder="输入消息..."
-            :disabled="isGenerating"
-            @input="adjustComposerHeight"
-            @keydown.enter.exact.prevent="sendMessage"
-          />
-        </div>
-        <div class="composer-side-actions">
-          <select ref="modelSelect" v-model="activeModelValue" class="model-switcher-hidden" aria-label="选择模型" :disabled="!modelConfig.accounts.length">
-            <option value="" disabled>未配置模型</option>
-            <optgroup
-              v-for="account in modelConfig.accounts"
-              :key="account.id"
-              :label="accountDisplayName(account)"
-            >
-              <option
-                v-for="model in accountModels(account)"
-                :key="makeModelValue(account.id, model)"
-                :value="makeModelValue(account.id, model)"
-              >
-                {{ model }}
-              </option>
-            </optgroup>
-          </select>
-          <button
-            class="secondary-button composer-square-button model-square-button"
-            type="button"
-            aria-label="选择模型"
-            title="选择模型"
-            :disabled="!modelConfig.accounts.length"
-            @click="openModelSelect"
-          >
-            {{ activeModelInitial }}
-          </button>
-          <button v-if="isGenerating" class="primary-button composer-square-button stop" type="button" aria-label="停止" title="停止" @click="stopGeneration">
-            <Square :size="16" />
-          </button>
-          <button
-            v-else
-            class="primary-button composer-square-button"
-            type="button"
-            aria-label="发送"
-            title="发送"
-            :disabled="!draft.trim()"
-            @click="sendMessage"
-          >
-            <Send :size="16" />
-          </button>
-        </div>
-      </footer>
-    </section>
-
-    <section v-if="pendingToolConfirmation" class="confirmation-layer" aria-label="工具确认">
-      <div class="confirmation-dialog">
-        <header>
-          <div>
-            <p class="eyebrow">工具确认</p>
-            <h2>{{ pendingToolTitle() }}</h2>
-          </div>
-          <button
-            class="icon-button"
-            type="button"
-            aria-label="拒绝工具调用"
-            title="拒绝工具调用"
-            @click="resolveToolConfirmation('denied')"
-          >
-            <X :size="18" />
-          </button>
-        </header>
-
-        <section class="confirmation-body">
-          <p>{{ pendingToolConfirmation.tool.description }}</p>
-          <div class="confirmation-meta">
-            <span>{{ pendingToolConfirmation.tool.source }}</span>
-            <span>{{ pendingToolConfirmation.tool.riskLevel }}</span>
-            <span>{{ pendingToolConfirmation.tool.permission }}</span>
-          </div>
-          <details v-if="pendingToolArgs()" class="tool-details" open>
-            <summary>调用参数</summary>
-            <div class="tool-detail-block">
-              <pre>{{ pendingToolArgs() }}</pre>
-            </div>
-          </details>
-        </section>
-
-        <footer>
-          <button class="secondary-button" type="button" @click="resolveToolConfirmation('denied')">拒绝</button>
-          <button class="primary-button" type="button" @click="resolveToolConfirmation('approved')">确认执行</button>
-        </footer>
-      </div>
-    </section>
+    <ToolConfirmationDialog
+      v-if="pendingToolConfirmation"
+      :title="pendingToolTitle()"
+      :tool="pendingToolConfirmation.tool"
+      :arguments-text="pendingToolArgs()"
+      @resolve="resolveToolConfirmation"
+    />
 
     <section v-if="configOpen" class="settings-drawer" aria-label="模型设置" @click.self="closeSettings">
       <div class="drawer-panel">
@@ -1212,56 +968,11 @@ function adjustComposerHeight() {
           </label>
         </section>
 
-        <section class="settings-section">
-          <div class="section-heading">
-            <h3>工具目录</h3>
-            <span>{{ enabledToolCount() }} / {{ catalogTools.length }} 已启用</span>
-          </div>
-
-          <div class="tool-catalog">
-            <section v-for="group in toolCatalogGroups" :key="group.key" class="tool-catalog-group">
-              <header>
-                <strong>{{ group.title }}</strong>
-                <small>{{ group.tools.length }} 个工具</small>
-              </header>
-
-              <article v-for="tool in group.tools" :key="tool.name" class="tool-catalog-item">
-                <div class="tool-catalog-main">
-                  <div class="tool-catalog-title">
-                    <strong>{{ toolCatalogTitle(tool) }}</strong>
-                    <small>{{ tool.name }}</small>
-                  </div>
-                  <p>{{ tool.description }}</p>
-                  <div class="tool-catalog-badges">
-                    <span :class="['risk-badge', tool.riskLevel]">{{ toolRiskLabel(tool.riskLevel) }}</span>
-                    <span>{{ toolPermissionLabel(tool.permission) }}</span>
-                    <span>{{ toolConfirmationPolicyLabel(tool.confirmationPolicy ?? 'auto') }}</span>
-                  </div>
-                </div>
-
-                <div class="tool-catalog-controls">
-                  <label class="tool-toggle">
-                    <input
-                      type="checkbox"
-                      :checked="tool.enabled !== false"
-                      @change="handleToolEnabledChange(tool.name, $event)"
-                    />
-                    <span>启用</span>
-                  </label>
-                  <select
-                    class="tool-policy-select"
-                    :value="tool.confirmationPolicy ?? 'auto'"
-                    @change="handleToolConfirmationPolicyChange(tool.name, $event)"
-                  >
-                    <option value="auto">自动</option>
-                    <option value="confirm">确认</option>
-                    <option value="deny">拒绝</option>
-                  </select>
-                </div>
-              </article>
-            </section>
-          </div>
-        </section>
+        <ToolCatalogSection
+          :tools="catalogTools"
+          :get-title="toolRegistry.getTitle"
+          @update-policy="handleToolPolicyUpdate"
+        />
 
         <footer class="settings-footer">
           <button class="danger-button compact-danger" type="button" :disabled="!activeSession" @click="deleteActiveSessionFromSettings">

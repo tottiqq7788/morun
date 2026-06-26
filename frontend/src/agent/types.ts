@@ -28,6 +28,7 @@ export type ToolPermission =
   | 'location'
   | 'camera'
   | 'contacts'
+  | 'call_log'
   | 'sms'
 export type ToolConfirmationPolicy = 'auto' | 'confirm' | 'deny'
 

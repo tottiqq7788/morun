@@ -24,11 +24,12 @@ const toolTitles: Record<string, string> = {
   recall_notes: '检索记忆',
   remember_note: '保存记忆',
   termux_clipboard: 'Termux 剪贴板',
+  termux_call_log: 'Termux 通话记录',
   termux_contacts: 'Termux 联系人',
   termux_device_status: 'Termux 设备状态',
   termux_location: 'Termux 定位',
   termux_media_capture: 'Termux 媒体采集',
-  termux_messages: 'Termux 短信与通话',
+  termux_messages: 'Termux 短信',
   termux_notify: 'Termux 通知',
 }
 

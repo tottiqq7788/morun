@@ -27,12 +27,47 @@ export interface NativeChatCompletionDoneEvent {
   requestId: string
 }
 
+export interface TermuxStatus {
+  available: boolean
+  termuxInstalled: boolean
+  termuxApiInstalled: boolean
+  runCommandPermissionGranted: boolean
+  canRunCommands: boolean
+  message: string
+}
+
+export interface TermuxCommandRequest {
+  requestId: string
+  command: string
+  args?: string[]
+  stdin?: string
+  workdir?: string
+  timeoutMs?: number
+}
+
+export interface TermuxCommandResult {
+  requestId: string
+  available: boolean
+  stdout: string
+  stderr: string
+  exitCode: number | null
+  timedOut: boolean
+  errCode?: number
+  errmsg?: string
+}
+
 export interface MorunNativePlugin {
   isAvailable(): Promise<NativeAvailability>
   secureGet(options: { key: string }): Promise<{ value: string | null }>
   secureSet(options: { key: string; value: string }): Promise<{ ok: true }>
   secureDelete(options: { key: string }): Promise<{ ok: true }>
   openUrl(options: { url: string }): Promise<{ ok: true }>
+  termuxStatus(): Promise<TermuxStatus>
+  requestTermuxRunCommandPermission(): Promise<TermuxStatus>
+  openTermuxInstallPage(): Promise<{ ok: true }>
+  openTermuxApiInstallPage(): Promise<{ ok: true }>
+  openTermuxApp(): Promise<{ ok: true }>
+  runTermuxCommand(options: TermuxCommandRequest): Promise<TermuxCommandResult>
   startChatCompletion(options: NativeChatCompletionRequest): Promise<{ requestId: string }>
   cancelChatCompletion(options: { requestId: string }): Promise<{ ok: true }>
   addListener(
@@ -56,6 +91,12 @@ export interface MorunNativeBridge {
   secureSet(key: string, value: string): Promise<boolean>
   secureDelete(key: string): Promise<boolean>
   openUrl(url: string): Promise<boolean>
+  termuxStatus(): Promise<TermuxStatus>
+  requestTermuxRunCommandPermission(): Promise<TermuxStatus>
+  openTermuxInstallPage(): Promise<boolean>
+  openTermuxApiInstallPage(): Promise<boolean>
+  openTermuxApp(): Promise<boolean>
+  runTermuxCommand(options: TermuxCommandRequest): Promise<TermuxCommandResult>
   startChatCompletion(options: NativeChatCompletionRequest): Promise<{ requestId: string }>
   cancelChatCompletion(requestId: string): Promise<boolean>
   addListener: MorunNativePlugin['addListener']
@@ -128,6 +169,67 @@ export function createMorunNativeBridge(
         return false
       }
     },
+    async termuxStatus() {
+      if (!(await platformInfo())) return unavailableTermuxStatus()
+
+      try {
+        return await plugin.termuxStatus()
+      } catch {
+        return unavailableTermuxStatus('无法读取 Termux 状态。')
+      }
+    },
+    async requestTermuxRunCommandPermission() {
+      if (!(await platformInfo())) return unavailableTermuxStatus()
+
+      try {
+        return await plugin.requestTermuxRunCommandPermission()
+      } catch {
+        try {
+          return await plugin.termuxStatus()
+        } catch {
+          return unavailableTermuxStatus('无法请求 RUN_COMMAND 权限。')
+        }
+      }
+    },
+    async openTermuxInstallPage() {
+      if (!(await platformInfo())) return false
+
+      try {
+        await plugin.openTermuxInstallPage()
+        return true
+      } catch {
+        return false
+      }
+    },
+    async openTermuxApiInstallPage() {
+      if (!(await platformInfo())) return false
+
+      try {
+        await plugin.openTermuxApiInstallPage()
+        return true
+      } catch {
+        return false
+      }
+    },
+    async openTermuxApp() {
+      if (!(await platformInfo())) return false
+
+      try {
+        await plugin.openTermuxApp()
+        return true
+      } catch {
+        return false
+      }
+    },
+    async runTermuxCommand(options) {
+      if (!(await platformInfo())) return unavailableTermuxCommandResult(options.requestId)
+
+      try {
+        return await plugin.runTermuxCommand(options)
+      } catch (error) {
+        return unavailableTermuxCommandResult(options.requestId, error instanceof Error ? error.message : undefined)
+      }
+    },
     async startChatCompletion(options) {
       if (!(await platformInfo())) {
         throw new Error('Native bridge unavailable.')
@@ -146,6 +248,28 @@ export function createMorunNativeBridge(
       }
     },
     addListener: plugin.addListener.bind(plugin),
+  }
+}
+
+function unavailableTermuxStatus(message = '仅 Android 支持 Termux 连接。'): TermuxStatus {
+  return {
+    available: false,
+    termuxInstalled: false,
+    termuxApiInstalled: false,
+    runCommandPermissionGranted: false,
+    canRunCommands: false,
+    message,
+  }
+}
+
+function unavailableTermuxCommandResult(requestId: string, message = '当前环境不支持 Termux。'): TermuxCommandResult {
+  return {
+    requestId,
+    available: false,
+    stdout: '',
+    stderr: message,
+    exitCode: null,
+    timedOut: false,
   }
 }
 

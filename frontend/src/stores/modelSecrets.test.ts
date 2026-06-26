@@ -119,6 +119,33 @@ function createBridge({
       return available
     },
     openUrl: async () => available,
+    termuxStatus: async () => ({
+      available,
+      termuxInstalled: available,
+      termuxApiInstalled: available,
+      runCommandPermissionGranted: available,
+      canRunCommands: available,
+      message: available ? 'ready' : 'unavailable',
+    }),
+    requestTermuxRunCommandPermission: async () => ({
+      available,
+      termuxInstalled: available,
+      termuxApiInstalled: available,
+      runCommandPermissionGranted: available,
+      canRunCommands: available,
+      message: available ? 'ready' : 'unavailable',
+    }),
+    openTermuxInstallPage: async () => available,
+    openTermuxApiInstallPage: async () => available,
+    openTermuxApp: async () => available,
+    runTermuxCommand: async ({ requestId }) => ({
+      requestId,
+      available,
+      stdout: '',
+      stderr: available ? '' : 'unavailable',
+      exitCode: available ? 0 : null,
+      timedOut: false,
+    }),
     startChatCompletion: async ({ requestId }) => ({ requestId }),
     cancelChatCompletion: async () => available,
     addListener: async () => ({

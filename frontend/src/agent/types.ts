@@ -17,7 +17,18 @@ export interface ToolCall {
 
 export type ToolSource = 'builtin' | 'native' | 'termux' | 'mcp' | 'plugin'
 export type ToolRiskLevel = 'safe' | 'low' | 'medium' | 'high'
-export type ToolPermission = 'none' | 'external_app' | 'local_storage' | 'network' | 'secret'
+export type ToolPermission =
+  | 'none'
+  | 'external_app'
+  | 'local_storage'
+  | 'network'
+  | 'secret'
+  | 'clipboard'
+  | 'notification'
+  | 'location'
+  | 'camera'
+  | 'contacts'
+  | 'sms'
 export type ToolConfirmationPolicy = 'auto' | 'confirm' | 'deny'
 
 export interface JsonSchema {

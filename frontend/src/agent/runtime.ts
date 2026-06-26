@@ -1,4 +1,5 @@
 import { requestChatCompletion, UnsupportedToolsError } from './openaiCompatible'
+import { isToolDenied, shouldConfirmTool } from './toolPolicy'
 import type {
   AgentMessage,
   AgentModelConfig,
@@ -138,7 +139,19 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
           continue
         }
 
-        if (tool.requiresConfirmation) {
+        if (isToolDenied(tool)) {
+          const error = `工具策略拒绝执行：${tool.name}`
+          history.push(toolResultMessage(toolCall.id, toolCall.name, { text: error, data: { denied: true } }))
+          options.onEvent?.({
+            type: 'tool_failed',
+            toolCall,
+            error,
+            durationMs: Date.now() - startedAt,
+          })
+          continue
+        }
+
+        if (shouldConfirmTool(tool)) {
           options.onEvent?.({
             type: 'tool_confirmation_required',
             toolCall,
@@ -223,9 +236,32 @@ function finishRun({
 }
 
 async function requestConfirmation(options: RunAgentTurnOptions, toolCall: ToolCall, tool: ToolDefinition) {
-  const decision = await options.requestToolConfirmation?.(toolCall, tool)
+  const decision = await withAbort(Promise.resolve(options.requestToolConfirmation?.(toolCall, tool)), options.signal)
   if (typeof decision === 'string') return decision
   return decision?.outcome ?? 'denied'
+}
+
+function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(createAbortError())
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      reject(createAbortError())
+    }
+
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 function toolResultMessage(toolCallId: string, toolName: string, output: ToolExecutionResult): AgentMessage {
@@ -239,11 +275,15 @@ function toolResultMessage(toolCallId: string, toolName: string, output: ToolExe
 
 function throwIfAborted(signal?: AbortSignal) {
   if (!signal?.aborted) return
-  throw new DOMException('Aborted', 'AbortError')
+  throw createAbortError()
 }
 
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function createAbortError() {
+  return new DOMException('Aborted', 'AbortError')
 }
 
 function formatToolError(error: unknown) {
@@ -263,6 +303,9 @@ function createUnknownTool(name: string): ToolDefinition {
     description: '未知工具。',
     source: 'plugin',
     riskLevel: 'high',
+    permission: 'none',
+    enabled: false,
+    confirmationPolicy: 'deny',
     requiresConfirmation: true,
     parameters: {
       type: 'object',

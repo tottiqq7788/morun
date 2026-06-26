@@ -47,7 +47,7 @@ export const requestChatCompletion: ChatCompletionClient = async (request) => {
       'Content-Type': 'application/json',
       ...(request.modelConfig.apiKey.trim() ? { Authorization: `Bearer ${request.modelConfig.apiKey.trim()}` } : {}),
     },
-    body: JSON.stringify(buildRequestBody(request)),
+    body: JSON.stringify(buildChatCompletionRequestBody(request)),
   })
 
   if (!response.ok) {
@@ -66,7 +66,7 @@ export const requestChatCompletion: ChatCompletionClient = async (request) => {
   return parseChatCompletion(payload)
 }
 
-function buildRequestBody(request: ChatCompletionRequest) {
+export function buildChatCompletionRequestBody(request: ChatCompletionRequest) {
   return {
     model: request.modelConfig.model,
     messages: request.messages.map(toProviderMessage),
@@ -142,11 +142,9 @@ async function parseStreamingChatCompletion(
   }
 
   const decoder = new TextDecoder()
-  const toolStates = new Map<number, { id: string; name: string; rawArguments: string }>()
+  const accumulator = createStreamingChatCompletionAccumulator(request.onContentDelta)
   let buffer = ''
-  let content = ''
   let done = false
-  let sawSseData = false
 
   while (!done) {
     const { value, done: streamDone } = await reader.read()
@@ -159,69 +157,97 @@ async function parseStreamingChatCompletion(
     for (const line of lines) {
       const data = parseSseDataLine(line)
       if (data === null) continue
-      sawSseData = true
       if (data === '[DONE]') {
+        accumulator.markDone()
         done = true
         break
       }
 
-      const delta = parseStreamingDelta(data)
-      if (!delta) continue
-
-      if (delta.content) {
-        content += delta.content
-        request.onContentDelta?.({
-          contentDelta: delta.content,
-          accumulatedContent: content,
-        })
-      }
-
-      for (const toolCall of delta.tool_calls ?? []) {
-        const index = typeof toolCall.index === 'number' ? toolCall.index : toolStates.size
-        const existing = toolStates.get(index) ?? {
-          id: `tool_call_${index + 1}`,
-          name: '',
-          rawArguments: '',
-        }
-
-        existing.id = toolCall.id || existing.id
-        existing.name = toolCall.function?.name || existing.name
-        existing.rawArguments += toolCall.function?.arguments ?? ''
-        toolStates.set(index, existing)
-      }
+      accumulator.applyData(data)
     }
   }
 
   if (buffer.trim()) {
     const data = parseSseDataLine(buffer)
     if (data && data !== '[DONE]') {
-      sawSseData = true
-      const delta = parseStreamingDelta(data)
-      if (delta?.content) {
-        content += delta.content
-        request.onContentDelta?.({
-          contentDelta: delta.content,
-          accumulatedContent: content,
-        })
-      }
+      accumulator.applyData(data)
+    } else if (data === '[DONE]') {
+      accumulator.markDone()
     }
   }
 
-  if (!sawSseData) {
+  if (!accumulator.sawSseData()) {
     throw new Error('流式响应格式无效。')
   }
 
+  return accumulator.result()
+}
+
+export interface StreamingChatCompletionAccumulator {
+  applyData(data: string): void
+  markDone(): void
+  sawSseData(): boolean
+  result(): ChatCompletionResult
+}
+
+export function createStreamingChatCompletionAccumulator(
+  onContentDelta?: ChatCompletionRequest['onContentDelta'],
+): StreamingChatCompletionAccumulator {
+  const toolStates = new Map<number, { id: string; name: string; rawArguments: string }>()
+  let content = ''
+  let sawSseData = false
+
+  const applyDelta = (delta: ProviderDelta | null) => {
+    if (!delta) return
+
+    if (delta.content) {
+      content += delta.content
+      onContentDelta?.({
+        contentDelta: delta.content,
+        accumulatedContent: content,
+      })
+    }
+
+    for (const toolCall of delta.tool_calls ?? []) {
+      const index = typeof toolCall.index === 'number' ? toolCall.index : toolStates.size
+      const existing = toolStates.get(index) ?? {
+        id: `tool_call_${index + 1}`,
+        name: '',
+        rawArguments: '',
+      }
+
+      existing.id = toolCall.id || existing.id
+      existing.name = toolCall.function?.name || existing.name
+      existing.rawArguments += toolCall.function?.arguments ?? ''
+      toolStates.set(index, existing)
+    }
+  }
+
   return {
-    content,
-    toolCalls: Array.from(toolStates.entries())
-      .sort(([left], [right]) => left - right)
-      .map(([, state]) => ({
-        id: state.id,
-        name: state.name,
-        rawArguments: state.rawArguments || '{}',
-        arguments: parseToolArguments(state.rawArguments || '{}'),
-      }))
-      .filter((toolCall) => toolCall.name),
+    applyData(data) {
+      sawSseData = true
+      applyDelta(parseStreamingDelta(data))
+    },
+    markDone() {
+      sawSseData = true
+    },
+    sawSseData() {
+      return sawSseData
+    },
+    result() {
+      return {
+        content,
+        toolCalls: Array.from(toolStates.entries())
+          .sort(([left], [right]) => left - right)
+          .map(([, state]) => ({
+            id: state.id,
+            name: state.name,
+            rawArguments: state.rawArguments || '{}',
+            arguments: parseToolArguments(state.rawArguments || '{}'),
+          }))
+          .filter((toolCall) => toolCall.name),
+      }
+    },
   }
 }
 

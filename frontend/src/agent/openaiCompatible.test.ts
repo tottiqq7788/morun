@@ -90,6 +90,7 @@ describe('requestChatCompletion streaming', () => {
           description: 'Echo.',
           source: 'builtin',
           riskLevel: 'safe',
+          permission: 'none',
           requiresConfirmation: false,
           parameters: {
             type: 'object',
@@ -102,6 +103,59 @@ describe('requestChatCompletion streaming', () => {
     })
 
     expect(result.content).toBe('')
+    expect(result.toolCalls).toEqual([
+      {
+        id: 'call_1',
+        name: 'echo',
+        rawArguments: '{"text":"hi"}',
+        arguments: { text: 'hi' },
+      },
+    ])
+  })
+
+  it('aggregates a trailing streamed tool call without a final newline', async () => {
+    mockFetchWithRawSse(
+      `data: ${JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_1',
+                  type: 'function',
+                  function: {
+                    name: 'echo',
+                    arguments: '{"text":"hi"}',
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      })}`,
+    )
+
+    const result = await requestChatCompletion({
+      ...baseRequest,
+      tools: [
+        {
+          name: 'echo',
+          description: 'Echo.',
+          source: 'builtin',
+          riskLevel: 'safe',
+          permission: 'none',
+          requiresConfirmation: false,
+          parameters: {
+            type: 'object',
+            additionalProperties: false,
+          },
+          execute: async () => ({ text: '' }),
+        },
+      ],
+      useTools: true,
+    })
+
     expect(result.toolCalls).toEqual([
       {
         id: 'call_1',
@@ -136,5 +190,9 @@ function mockFetchWithSse(events: Array<unknown | '[DONE]'>) {
     })
     .join('')
 
+  globalThis.fetch = vi.fn(async () => new Response(body, { status: 200 })) as typeof fetch
+}
+
+function mockFetchWithRawSse(body: string) {
   globalThis.fetch = vi.fn(async () => new Response(body, { status: 200 })) as typeof fetch
 }

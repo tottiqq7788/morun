@@ -44,6 +44,7 @@ export interface ModelAccount {
   providerId: string
   name: string
   apiKey: string
+  apiKeyRef?: string
   model: string
   availableModels: string[]
   createdAt: number
@@ -65,6 +66,10 @@ export const legacySessionsKey = 'family-agent.sessions.v1'
 export const configKey = 'morun.model-config.v2'
 export const legacyConfigKey = 'family-agent.model-config.v2'
 export const olderConfigKey = 'family-agent.model-config.v1'
+
+const validRoles = new Set<Role>(['user', 'assistant', 'tool'])
+const validMessageStatuses = new Set<MessageStatus>(['complete', 'streaming', 'error'])
+const validToolStatuses = new Set<ToolStatus>(['running', 'done', 'error'])
 
 export const providerPresets: ProviderPreset[] = [
   {
@@ -280,13 +285,11 @@ export function useChatStore(storage: StorageLike = localStorage) {
 
 export function loadSessions(storage: StorageLike): ChatSession[] {
   const stored =
-    safeParse<ChatSession[]>(storage.getItem(sessionsKey)) ??
-    safeParse<ChatSession[]>(storage.getItem(legacySessionsKey))
-  if (stored?.length) {
-    return stored.map((session) => ({
-      ...session,
-      title: session.title === 'New chat' ? '新会话' : session.title,
-    }))
+    safeParse<unknown>(storage.getItem(sessionsKey)) ??
+    safeParse<unknown>(storage.getItem(legacySessionsKey))
+  const sessions = normalizeSessions(stored)
+  if (sessions.length) {
+    return sessions
   }
 
   return [createSessionModel()]
@@ -368,6 +371,73 @@ export function normalizeModels(value: unknown) {
   return Array.from(new Set(value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)))
 }
 
+export function normalizeSessions(value: unknown): ChatSession[] {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map((item): ChatSession | null => {
+      const raw = asRecord(item)
+      if (!raw) return null
+
+      const now = Date.now()
+      const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : '新会话'
+      const createdAt = asFiniteNumber(raw.createdAt) ?? now
+
+      return {
+        id: typeof raw.id === 'string' && raw.id ? raw.id : createId('session'),
+        title: title === 'New chat' ? '新会话' : title.slice(0, 80),
+        createdAt,
+        updatedAt: asFiniteNumber(raw.updatedAt) ?? createdAt,
+        messages: normalizeMessages(raw.messages),
+      }
+    })
+    .filter((session): session is ChatSession => Boolean(session))
+}
+
+function normalizeMessages(value: unknown): ChatMessage[] {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map((item): ChatMessage | null => {
+      const raw = asRecord(item)
+      const role = raw?.role
+      if (!raw || !validRoles.has(role as Role)) return null
+      const wasStreaming = raw.status === 'streaming'
+      const rawToolStatus = validToolStatuses.has(raw.toolStatus as ToolStatus)
+        ? (raw.toolStatus as ToolStatus)
+        : undefined
+      const wasRunningTool = rawToolStatus === 'running'
+
+      const message: ChatMessage = {
+        id: typeof raw.id === 'string' && raw.id ? raw.id : createId('message'),
+        role: role as Role,
+        content: typeof raw.content === 'string' ? raw.content : '',
+        createdAt: asFiniteNumber(raw.createdAt) ?? Date.now(),
+        status:
+          wasStreaming || wasRunningTool
+            ? 'error'
+            : validMessageStatuses.has(raw.status as MessageStatus)
+              ? (raw.status as MessageStatus)
+              : 'complete',
+      }
+
+      if (typeof raw.error === 'string') message.error = raw.error
+      else if (wasStreaming) message.error = '上次生成已中断。'
+      if (typeof raw.toolName === 'string') message.toolName = raw.toolName
+      if (typeof raw.toolCallId === 'string') message.toolCallId = raw.toolCallId
+      if ('toolArgs' in raw) message.toolArgs = raw.toolArgs
+      if ('toolResult' in raw) message.toolResult = raw.toolResult
+      if (rawToolStatus) message.toolStatus = wasRunningTool ? 'error' : rawToolStatus
+      if (asFiniteNumber(raw.toolDuration) !== undefined) message.toolDuration = asFiniteNumber(raw.toolDuration)
+      if (typeof raw.toolError === 'string') message.toolError = raw.toolError
+      else if (wasRunningTool) message.toolError = '工具执行已中断。'
+      if (wasRunningTool && !message.content) message.content = message.toolError ?? '工具执行已中断。'
+
+      return message
+    })
+    .filter((message): message is ChatMessage => Boolean(message))
+}
+
 export function normalizeAccounts(value: unknown): ModelAccount[] {
   if (!Array.isArray(value)) return []
 
@@ -389,6 +459,7 @@ export function normalizeAccounts(value: unknown): ModelAccount[] {
         providerId: provider.id,
         name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 80) : provider.name,
         apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : '',
+        apiKeyRef: typeof raw.apiKeyRef === 'string' && raw.apiKeyRef ? raw.apiKeyRef : undefined,
         model: storedModel || modelPool[0] || '',
         availableModels,
         createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : now,
@@ -540,6 +611,14 @@ export function buildAgentMessages(
 
 export function trimTrailingSlash(value: string) {
   return value.trim().replace(/\/+$/, '')
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+}
+
+function asFiniteNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function formatTime(value: number) {

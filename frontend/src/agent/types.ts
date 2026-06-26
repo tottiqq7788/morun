@@ -17,6 +17,8 @@ export interface ToolCall {
 
 export type ToolSource = 'builtin' | 'native' | 'termux' | 'mcp' | 'plugin'
 export type ToolRiskLevel = 'safe' | 'low' | 'medium' | 'high'
+export type ToolPermission = 'none' | 'external_app' | 'local_storage' | 'network' | 'secret'
+export type ToolConfirmationPolicy = 'auto' | 'confirm' | 'deny'
 
 export interface JsonSchema {
   type?: string
@@ -53,6 +55,9 @@ export interface ToolDefinition {
   parameters: JsonSchema
   source: ToolSource
   riskLevel: ToolRiskLevel
+  permission: ToolPermission
+  enabled?: boolean
+  confirmationPolicy?: ToolConfirmationPolicy
   requiresConfirmation: boolean
   execute(args: unknown, context: ToolExecutionContext): Promise<ToolExecutionResult>
 }

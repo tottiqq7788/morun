@@ -17,6 +17,7 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
       description: '获取当前时间。可以指定 IANA 时区，例如 Asia/Shanghai 或 America/New_York。',
       source: 'builtin',
       riskLevel: 'safe',
+      permission: 'none',
       requiresConfirmation: false,
       parameters: {
         type: 'object',
@@ -54,6 +55,7 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
       description: '计算一个安全的数学表达式。只支持数字、括号、+、-、*、/、% 和一元正负号。',
       source: 'builtin',
       riskLevel: 'safe',
+      permission: 'none',
       requiresConfirmation: false,
       parameters: {
         type: 'object',
@@ -87,6 +89,7 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
       description: '把一条用户希望保留的偏好、事实或备忘保存到本地记忆。',
       source: 'builtin',
       riskLevel: 'low',
+      permission: 'local_storage',
       requiresConfirmation: false,
       parameters: {
         type: 'object',
@@ -133,6 +136,7 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
       description: '从本地记忆中检索之前保存的偏好、事实或备忘。',
       source: 'builtin',
       riskLevel: 'safe',
+      permission: 'local_storage',
       requiresConfirmation: false,
       parameters: {
         type: 'object',
@@ -179,6 +183,7 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
       description: '清空所有本地记忆。这个操作需要用户确认。',
       source: 'builtin',
       riskLevel: 'medium',
+      permission: 'local_storage',
       requiresConfirmation: true,
       parameters: {
         type: 'object',

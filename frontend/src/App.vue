@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import {
   CheckCircle2,
   CircleAlert,
@@ -15,9 +15,20 @@ import {
   Trash2,
   X,
 } from '@lucide/vue'
+import { createChatCompletionClient } from './agent/chatTransport'
 import { runAgentTurn, type ToolConfirmationDecision } from './agent/runtime'
 import { createToolRegistry } from './agent/toolRegistry'
-import type { AgentRunEvent, ToolCall, ToolDefinition } from './agent/types'
+import { loadToolPolicy, saveToolPolicy } from './agent/toolPolicy'
+import type {
+  AgentRunEvent,
+  ToolCall,
+  ToolConfirmationPolicy,
+  ToolDefinition,
+  ToolPermission,
+  ToolRiskLevel,
+  ToolSource,
+} from './agent/types'
+import { morunNativeBridge } from './native/morunNative'
 import {
   accountDisplayName,
   accountModels,
@@ -36,6 +47,11 @@ import {
   type ChatSession,
   type ModelAccount,
 } from './stores/chat'
+import {
+  migrateModelAccountSecrets,
+  resolveModelAccountApiKey,
+  withStoredModelAccountApiKey,
+} from './stores/modelSecrets'
 
 type ConnectionState = 'idle' | 'testing' | 'success' | 'error'
 
@@ -72,8 +88,13 @@ const {
   activeModelInitial,
   activeModelValue,
 } = chatStore
-const toolRegistry = createToolRegistry()
-const agentTools = toolRegistry.tools
+const nativeBridge = morunNativeBridge
+const chatCompletionClient = createChatCompletionClient({ nativeBridge })
+const toolPolicy = ref(loadToolPolicy())
+const toolRegistry = computed(() => createToolRegistry({ storage: localStorage, nativeBridge }, toolPolicy.value))
+const agentTools = computed(() => toolRegistry.value.tools)
+const catalogTools = computed(() => toolRegistry.value.catalogTools)
+const toolCatalogGroups = computed(() => groupToolCatalog(catalogTools.value))
 const draft = ref('')
 const configOpen = ref(false)
 const sidebarOpen = ref(false)
@@ -97,6 +118,12 @@ const draftProvider = computed(() => {
 
 const draftModels = computed(() => {
   return accountModels(accountDraft.value)
+})
+
+onMounted(async () => {
+  if (await migrateModelAccountSecrets(modelConfig.value, nativeBridge)) {
+    chatStore.saveConfig()
+  }
 })
 
 function createSession() {
@@ -231,7 +258,7 @@ async function testDraftConnection() {
   }
 }
 
-function saveAccountDraft() {
+async function saveAccountDraft() {
   const provider = draftProvider.value
   const models = normalizeModels(accountDraft.value.availableModels)
   const modelPool = models.length ? models : provider.models
@@ -242,16 +269,26 @@ function saveAccountDraft() {
     id: createId('account'),
     providerId: provider.id,
     name: accountDraft.value.name.trim().slice(0, 80) || `${provider.name} ${sameProviderCount + 1}`,
-    apiKey: accountDraft.value.apiKey.trim(),
+    apiKey: '',
     model,
     availableModels: models,
     createdAt: now,
     updatedAt: now,
     lastTestedAt: accountDraft.value.lastTestedAt,
   }
+  let accountWithSecret: ModelAccount
+  try {
+    accountWithSecret = await withStoredModelAccountApiKey(account, accountDraft.value.apiKey, nativeBridge)
+  } catch (error) {
+    connectionStatus.value = {
+      state: 'error',
+      text: formatConnectionError(error),
+    }
+    return
+  }
 
-  modelConfig.value.accounts.push(account)
-  modelConfig.value.activeAccountId = account.id
+  modelConfig.value.accounts.push(accountWithSecret)
+  modelConfig.value.activeAccountId = accountWithSecret.id
   accountDialogOpen.value = false
 }
 
@@ -275,7 +312,9 @@ async function sendMessage() {
     return
   }
 
-  if (provider.requiresApiKey && !account.apiKey.trim()) {
+  const apiKey = await resolveModelAccountApiKey(account, nativeBridge)
+
+  if (provider.requiresApiKey && !apiKey.trim()) {
     configOpen.value = true
     return
   }
@@ -303,13 +342,14 @@ async function sendMessage() {
       messages: buildAgentMessages(session, assistantMessage.id, modelConfig.value.systemPrompt),
       modelConfig: {
         baseUrl: provider.baseUrl,
-        apiKey: account.apiKey,
+        apiKey,
         model: account.model,
         temperature: modelConfig.value.temperature,
         maxTokens: modelConfig.value.maxTokens,
         stream: modelConfig.value.stream,
       },
-      tools: agentTools,
+      tools: agentTools.value,
+      client: chatCompletionClient,
       signal: controller.signal,
       toolContext: {
         storage: localStorage,
@@ -366,7 +406,7 @@ function handleAgentEvent(session: ChatSession, assistantMessage: ChatMessage, e
   }
 
   if (event.type === 'tool_started') {
-    removeEmptyAssistantPlaceholder(session, assistantMessage.id)
+    removeAssistantPlaceholder(session, assistantMessage.id)
     session.messages.push({
       id: createId('message'),
       role: 'tool',
@@ -477,9 +517,9 @@ function updateToolConfirmationMessage(session: ChatSession, toolCallId: string)
   scheduleScroll()
 }
 
-function removeEmptyAssistantPlaceholder(session: ChatSession, assistantMessageId: string) {
+function removeAssistantPlaceholder(session: ChatSession, assistantMessageId: string) {
   const placeholder = session.messages.find((message) => message.id === assistantMessageId)
-  if (!placeholder || placeholder.content.trim() || placeholder.error) return
+  if (!placeholder) return
 
   session.messages = session.messages.filter((message) => message.id !== assistantMessageId)
 }
@@ -544,16 +584,118 @@ function toolDisplayName(message: ChatMessage) {
 
 function toolDisplayTitle(message: ChatMessage) {
   const name = toolDisplayName(message)
-  return toolRegistry.getTitle(name)
+  return toolRegistry.value.getTitle(name)
 }
 
 function pendingToolTitle() {
   const pending = pendingToolConfirmation.value
-  return pending ? toolRegistry.getTitle(pending.tool.name) : ''
+  return pending ? toolRegistry.value.getTitle(pending.tool.name) : ''
 }
 
 function pendingToolArgs() {
   return stringifyCompact(pendingToolConfirmation.value?.toolCall.arguments)
+}
+
+function groupToolCatalog(tools: ToolDefinition[]) {
+  const groups = new Map<ToolSource, ToolDefinition[]>()
+  for (const tool of tools) {
+    groups.set(tool.source, [...(groups.get(tool.source) ?? []), tool])
+  }
+
+  return Array.from(groups.entries()).map(([source, items]) => ({
+    key: source,
+    title: toolSourceLabel(source),
+    tools: items.sort((left, right) => left.riskLevel.localeCompare(right.riskLevel) || left.name.localeCompare(right.name)),
+  }))
+}
+
+function enabledToolCount() {
+  return catalogTools.value.filter((tool) => tool.enabled !== false && tool.confirmationPolicy !== 'deny').length
+}
+
+function toolCatalogTitle(tool: ToolDefinition) {
+  return toolRegistry.value.getTitle(tool.name)
+}
+
+function handleToolEnabledChange(toolName: string, event: Event) {
+  const target = event.target as HTMLInputElement | null
+  setToolPolicy(toolName, {
+    enabled: Boolean(target?.checked),
+  })
+}
+
+function handleToolConfirmationPolicyChange(toolName: string, event: Event) {
+  const target = event.target as HTMLSelectElement | null
+  if (!isToolConfirmationPolicy(target?.value)) return
+
+  setToolPolicy(toolName, {
+    confirmationPolicy: target.value,
+  })
+}
+
+function setToolPolicy(
+  toolName: string,
+  patch: {
+    enabled?: boolean
+    confirmationPolicy?: ToolConfirmationPolicy
+  },
+) {
+  const current = toolPolicy.value.tools[toolName] ?? {}
+  toolPolicy.value = {
+    tools: {
+      ...toolPolicy.value.tools,
+      [toolName]: {
+        ...current,
+        ...patch,
+      },
+    },
+  }
+  saveToolPolicy(toolPolicy.value)
+}
+
+function isToolConfirmationPolicy(value: unknown): value is ToolConfirmationPolicy {
+  return value === 'auto' || value === 'confirm' || value === 'deny'
+}
+
+function toolSourceLabel(source: ToolSource) {
+  const labels: Record<ToolSource, string> = {
+    builtin: '内置工具',
+    native: '原生工具',
+    termux: 'Termux 工具',
+    mcp: 'MCP 工具',
+    plugin: '插件工具',
+  }
+  return labels[source]
+}
+
+function toolRiskLabel(riskLevel: ToolRiskLevel) {
+  const labels: Record<ToolRiskLevel, string> = {
+    safe: '安全',
+    low: '低风险',
+    medium: '中风险',
+    high: '高风险',
+  }
+  return labels[riskLevel]
+}
+
+function toolPermissionLabel(permission: ToolPermission) {
+  const labels: Record<ToolPermission, string> = {
+    none: '无权限',
+    external_app: '外部应用',
+    local_storage: '本地存储',
+    network: '网络',
+    secret: '密钥',
+  }
+  return labels[permission]
+}
+
+function toolConfirmationPolicyLabel(policy: ToolConfirmationPolicy) {
+  const labels: Record<ToolConfirmationPolicy, string> = {
+    auto: '自动',
+    confirm: '每次确认',
+    deny: '拒绝',
+  }
+  return labels[policy]
 }
 
 function toolSubtitle(message: ChatMessage) {
@@ -994,6 +1136,7 @@ function adjustComposerHeight() {
           <div class="confirmation-meta">
             <span>{{ pendingToolConfirmation.tool.source }}</span>
             <span>{{ pendingToolConfirmation.tool.riskLevel }}</span>
+            <span>{{ pendingToolConfirmation.tool.permission }}</span>
           </div>
           <details v-if="pendingToolArgs()" class="tool-details" open>
             <summary>调用参数</summary>
@@ -1058,6 +1201,57 @@ function adjustComposerHeight() {
           <label>
             <textarea v-model="modelConfig.systemPrompt" rows="5" />
           </label>
+        </section>
+
+        <section class="settings-section">
+          <div class="section-heading">
+            <h3>工具目录</h3>
+            <span>{{ enabledToolCount() }} / {{ catalogTools.length }} 已启用</span>
+          </div>
+
+          <div class="tool-catalog">
+            <section v-for="group in toolCatalogGroups" :key="group.key" class="tool-catalog-group">
+              <header>
+                <strong>{{ group.title }}</strong>
+                <small>{{ group.tools.length }} 个工具</small>
+              </header>
+
+              <article v-for="tool in group.tools" :key="tool.name" class="tool-catalog-item">
+                <div class="tool-catalog-main">
+                  <div class="tool-catalog-title">
+                    <strong>{{ toolCatalogTitle(tool) }}</strong>
+                    <small>{{ tool.name }}</small>
+                  </div>
+                  <p>{{ tool.description }}</p>
+                  <div class="tool-catalog-badges">
+                    <span :class="['risk-badge', tool.riskLevel]">{{ toolRiskLabel(tool.riskLevel) }}</span>
+                    <span>{{ toolPermissionLabel(tool.permission) }}</span>
+                    <span>{{ toolConfirmationPolicyLabel(tool.confirmationPolicy ?? 'auto') }}</span>
+                  </div>
+                </div>
+
+                <div class="tool-catalog-controls">
+                  <label class="tool-toggle">
+                    <input
+                      type="checkbox"
+                      :checked="tool.enabled !== false"
+                      @change="handleToolEnabledChange(tool.name, $event)"
+                    />
+                    <span>启用</span>
+                  </label>
+                  <select
+                    class="tool-policy-select"
+                    :value="tool.confirmationPolicy ?? 'auto'"
+                    @change="handleToolConfirmationPolicyChange(tool.name, $event)"
+                  >
+                    <option value="auto">自动</option>
+                    <option value="confirm">确认</option>
+                    <option value="deny">拒绝</option>
+                  </select>
+                </div>
+              </article>
+            </section>
+          </div>
         </section>
 
         <footer class="settings-footer">

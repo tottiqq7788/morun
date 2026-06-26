@@ -17,6 +17,7 @@ const echoTool: ToolDefinition = {
   description: 'Echo text.',
   source: 'builtin',
   riskLevel: 'safe',
+  permission: 'none',
   requiresConfirmation: false,
   parameters: {
     type: 'object',
@@ -44,6 +45,7 @@ const failingTool: ToolDefinition = {
   description: 'Always fail.',
   source: 'builtin',
   riskLevel: 'low',
+  permission: 'none',
   requiresConfirmation: false,
   parameters: {
     type: 'object',
@@ -59,6 +61,7 @@ const guardedTool: ToolDefinition = {
   description: 'Requires confirmation.',
   source: 'builtin',
   riskLevel: 'medium',
+  permission: 'none',
   requiresConfirmation: true,
   parameters: {
     type: 'object',
@@ -332,5 +335,39 @@ describe('runAgentTurn', () => {
     expect(result.content).toBe('denied final')
     expect(toolMessage?.content).toContain('用户拒绝执行工具')
     expect(toolMessage?.content).not.toContain('guarded done')
+  })
+
+  it('aborts while waiting for guarded tool confirmation', async () => {
+    const events: AgentRunEvent[] = []
+    const controller = new AbortController()
+    const client: ChatCompletionClient = async () => ({
+      content: '',
+      toolCalls: [
+        {
+          id: 'call_guarded',
+          name: 'guarded',
+          rawArguments: '{}',
+          arguments: {},
+        },
+      ],
+    })
+
+    await expect(
+      runAgentTurn({
+        messages: [{ role: 'user', content: 'guarded' }],
+        modelConfig,
+        tools: [guardedTool],
+        client,
+        signal: controller.signal,
+        requestToolConfirmation: async () => {
+          controller.abort()
+          return new Promise<never>(() => {})
+        },
+        onEvent: (event) => events.push(event),
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' })
+
+    expect(events.map((event) => event.type)).toContain('tool_confirmation_required')
+    expect(events.map((event) => event.type)).toContain('run_aborted')
   })
 })

@@ -110,6 +110,10 @@ textarea {
   gap: 18px;
 }
 
+.sidebar-backdrop {
+  display: none;
+}
+
 .panel-header,
 .chat-header,
 .drawer-panel > header {
@@ -223,7 +227,7 @@ h3 {
 
 .chat-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 100svh;
   min-width: 0;
 }
@@ -249,16 +253,20 @@ h3 {
 }
 
 .chat-title h2,
-.chat-title p {
+.chat-subtitle span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chat-title p {
+.chat-subtitle {
+  align-items: center;
   color: var(--muted);
+  display: flex;
   font-size: 13px;
+  gap: 8px;
   margin-top: 3px;
+  min-width: 0;
 }
 
 .header-actions {
@@ -269,7 +277,7 @@ h3 {
 
 .message-scroll {
   overflow-y: auto;
-  padding: 24px 18px 18px;
+  padding: 24px 18px 182px;
 }
 
 .empty-state {
@@ -290,7 +298,7 @@ h3 {
 
 .message-row {
   display: flex;
-  margin: 0 auto 14px;
+  margin: 0 auto 12px;
   max-width: 900px;
 }
 
@@ -305,10 +313,9 @@ h3 {
 .message-bubble {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  max-width: min(720px, 88%);
-  min-width: 180px;
-  padding: 12px 13px;
+  border-radius: 12px;
+  max-width: min(720px, 82%);
+  padding: 11px 14px 12px;
   white-space: pre-wrap;
 }
 
@@ -316,17 +323,6 @@ h3 {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
-}
-
-.message-meta {
-  align-items: center;
-  color: inherit;
-  display: flex;
-  font-size: 12px;
-  font-weight: 700;
-  justify-content: space-between;
-  margin-bottom: 7px;
-  opacity: 0.78;
 }
 
 .message-bubble p {
@@ -346,21 +342,62 @@ h3 {
 .composer {
   background: var(--bg);
   border-top: 1px solid var(--line);
-  display: grid;
+  bottom: 0;
+  display: flex;
   gap: 10px;
+  left: 292px;
   padding: 14px 18px 16px;
+  position: fixed;
+  right: 0;
+  z-index: 5;
 }
 
-.composer textarea {
-  min-height: 54px;
+.composer-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.composer-input textarea {
+  min-height: 100px;
   max-height: 160px;
+  overflow-y: auto;
+  resize: none;
 }
 
-.composer-actions,
 .drawer-panel footer {
   display: flex;
   gap: 9px;
   justify-content: flex-end;
+}
+
+.composer-side-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-rows: 1fr 1fr;
+  position: relative;
+  width: 46px;
+}
+
+.composer-square-button {
+  height: 46px;
+  min-height: 46px;
+  padding: 0;
+  width: 46px;
+}
+
+.model-square-button {
+  color: var(--accent-strong);
+  font-weight: 800;
+}
+
+.model-switcher-hidden {
+  height: 46px;
+  inset: 0 0 auto 0;
+  opacity: 0;
+  padding: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 46px;
 }
 
 .primary-button,
@@ -404,7 +441,27 @@ h3 {
   padding-inline: 11px;
 }
 
+.danger-button {
+  align-items: center;
+  background: var(--warn-soft);
+  border: 1px solid rgba(159, 63, 47, 0.24);
+  border-radius: 7px;
+  color: var(--warn);
+  cursor: pointer;
+  display: inline-flex;
+  gap: 7px;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+
+.danger-button:hover {
+  background: #f1d2c5;
+}
+
 .settings-drawer {
+  animation: fade-in 160ms ease both;
   background: rgba(39, 34, 28, 0.3);
   inset: 0;
   position: fixed;
@@ -412,6 +469,7 @@ h3 {
 }
 
 .drawer-panel {
+  animation: slide-in-right 190ms ease both;
   background: linear-gradient(180deg, #fffaf4 0%, #f7f1e8 100%);
   box-shadow: var(--shadow);
   display: flex;
@@ -423,6 +481,120 @@ h3 {
   overflow-y: auto;
   padding: 20px;
   width: min(100%, 520px);
+}
+
+.model-account-list {
+  display: grid;
+  gap: 9px;
+}
+
+.model-account-card {
+  align-items: center;
+  background: rgba(255, 253, 249, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 68px;
+  padding: 11px;
+  text-align: left;
+}
+
+.model-account-card:hover {
+  background: #fffdf9;
+  border-color: #cdbca9;
+}
+
+.model-account-card.selected {
+  background: #fffdf9;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.model-account-card strong,
+.model-account-card small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-account-card strong {
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.model-account-card small {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.empty-copy {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.settings-footer {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between !important;
+  margin-top: auto;
+  padding-top: 15px;
+}
+
+.footer-actions {
+  display: flex;
+  gap: 9px;
+}
+
+.compact-danger {
+  min-height: 40px;
+}
+
+.account-dialog-layer {
+  align-items: center;
+  animation: fade-in 160ms ease both;
+  background: rgba(39, 34, 28, 0.34);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 18px;
+  position: fixed;
+  z-index: 12;
+}
+
+.account-dialog {
+  background: var(--panel);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: min(760px, 92svh);
+  max-width: 460px;
+  overflow-y: auto;
+  padding: 18px;
+  width: min(100%, 460px);
+}
+
+.account-dialog > header,
+.account-dialog footer {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.account-dialog footer {
+  justify-content: flex-end;
 }
 
 .settings-section {
@@ -493,7 +665,8 @@ h3 {
   line-height: 1.45;
 }
 
-.drawer-panel label {
+.drawer-panel label,
+.account-dialog label {
   color: var(--muted);
   display: grid;
   font-size: 13px;
@@ -578,6 +751,19 @@ h3 {
     display: block;
   }
 
+  .sidebar-backdrop {
+    animation: fade-in 160ms ease both;
+    background: rgba(39, 34, 28, 0.32);
+    bottom: 0;
+    cursor: pointer;
+    display: block;
+    left: 0;
+    position: fixed;
+    right: 0;
+    top: 0;
+    z-index: 7;
+  }
+
   .session-panel {
     bottom: 0;
     box-shadow: var(--shadow);
@@ -607,6 +793,12 @@ h3 {
     gap: 0;
   }
 
+  .chat-subtitle {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
   .message-scroll {
     padding-inline: 12px;
   }
@@ -616,16 +808,8 @@ h3 {
   }
 
   .composer {
+    left: 0;
     padding-inline: 12px;
-  }
-
-  .composer-actions {
-    justify-content: stretch;
-  }
-
-  .composer-actions .primary-button,
-  .composer-actions .secondary-button {
-    flex: 1;
   }
 
   .provider-grid,
@@ -639,5 +823,38 @@ h3 {
 
   .status-line .secondary-button {
     width: 100%;
+  }
+
+  .settings-footer {
+    align-items: stretch;
+  }
+
+  .footer-actions {
+    flex: 1;
+    justify-content: flex-end;
+  }
+
+  .compact-danger {
+    padding-inline: 10px;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(105%);
+  }
+
+  to {
+    transform: translateX(0);
   }
 }

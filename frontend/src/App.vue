@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
-  Check,
-  Copy,
   Menu,
   MessageSquare,
   Plus,
@@ -46,15 +44,33 @@ interface ProviderPreset {
   models: string[]
 }
 
-interface ModelConfig {
+interface ModelAccount {
+  id: string
   providerId: string
+  name: string
   apiKey: string
   model: string
   availableModels: string[]
+  createdAt: number
+  updatedAt: number
+  lastTestedAt?: number
+}
+
+interface ModelConfig {
+  activeAccountId: string
+  accounts: ModelAccount[]
   temperature: number
   maxTokens: number
   systemPrompt: string
   stream: boolean
+}
+
+interface AccountDraft {
+  providerId: string
+  name: string
+  apiKey: string
+  model: string
+  availableModels: string[]
   lastTestedAt?: number
 }
 
@@ -145,10 +161,8 @@ const providerPresets: ProviderPreset[] = [
 ]
 
 const defaultConfig: ModelConfig = {
-  providerId: 'deepseek',
-  apiKey: '',
-  model: 'deepseek-chat',
-  availableModels: [],
+  activeAccountId: '',
+  accounts: [],
   temperature: 0.7,
   maxTokens: 4096,
   systemPrompt: '你是一个运行在手机上的智能助手，回答要清晰、可靠、适合移动端阅读。',
@@ -160,12 +174,15 @@ const modelConfig = ref<ModelConfig>(loadConfig())
 const activeSessionId = ref(sessions.value[0]?.id ?? '')
 const draft = ref('')
 const configOpen = ref(false)
-const sidebarOpen = ref(true)
+const sidebarOpen = ref(false)
+const accountDialogOpen = ref(false)
+const accountDraft = ref<AccountDraft>(createAccountDraft('deepseek'))
 const isGenerating = ref(false)
 const isTestingConnection = ref(false)
 const activeAbortController = ref<AbortController | null>(null)
 const messagesEnd = ref<HTMLElement | null>(null)
-const copiedMessageId = ref('')
+const composerTextarea = ref<HTMLTextAreaElement | null>(null)
+const modelSelect = ref<HTMLSelectElement | null>(null)
 const connectionStatus = ref<ConnectionStatus>({
   state: 'idle',
   text: '尚未测试连接。',
@@ -183,16 +200,50 @@ const hasMessages = computed(() => {
   return Boolean(activeSession.value?.messages.length)
 })
 
+const activeModelAccount = computed(() => {
+  const accounts = modelConfig.value.accounts
+  return accounts.find((account) => account.id === modelConfig.value.activeAccountId) ?? accounts[0] ?? null
+})
+
 const selectedProvider = computed(() => {
-  return getProviderById(modelConfig.value.providerId)
+  return activeModelAccount.value ? getProviderById(activeModelAccount.value.providerId) : null
 })
 
-const selectableModels = computed(() => {
-  return modelConfig.value.availableModels.length ? modelConfig.value.availableModels : selectedProvider.value.models
+const draftProvider = computed(() => {
+  return getProviderById(accountDraft.value.providerId)
 })
 
-const lastTestLabel = computed(() => {
-  return modelConfig.value.lastTestedAt ? `上次测试 ${formatTime(modelConfig.value.lastTestedAt)}` : '尚未测试'
+const draftModels = computed(() => {
+  return accountModels(accountDraft.value)
+})
+
+const activeModelLabel = computed(() => {
+  const account = activeModelAccount.value
+  if (!account) return '未配置模型'
+
+  return `${accountDisplayName(account)} · ${account.model || '未选择模型'}`
+})
+
+const activeModelInitial = computed(() => {
+  const account = activeModelAccount.value
+  const label = account?.model || account?.name || ''
+  return label.trim().charAt(0).toUpperCase() || '?'
+})
+
+const activeModelValue = computed({
+  get() {
+    const account = activeModelAccount.value
+    return account?.model ? makeModelValue(account.id, account.model) : ''
+  },
+  set(value: string) {
+    const [accountId, model] = value.split('::')
+    const account = modelConfig.value.accounts.find((item) => item.id === accountId)
+    if (!account || !model) return
+
+    modelConfig.value.activeAccountId = account.id
+    account.model = model
+    account.updatedAt = Date.now()
+  },
 })
 
 watch(
@@ -233,30 +284,61 @@ function loadSessions(): ChatSession[] {
 
 function loadConfig(): ModelConfig {
   const stored =
-    safeParse<Partial<ModelConfig> & { providerName?: string; baseUrl?: string }>(localStorage.getItem(configKey)) ??
-    safeParse<Partial<ModelConfig> & { providerName?: string; baseUrl?: string }>(localStorage.getItem(legacyConfigKey)) ??
-    safeParse<Partial<ModelConfig> & { providerName?: string; baseUrl?: string }>(localStorage.getItem(olderConfigKey))
+    safeParse<
+      Partial<ModelConfig> & {
+        providerId?: string
+        providerName?: string
+        baseUrl?: string
+        apiKey?: string
+        model?: string
+        availableModels?: unknown
+        lastTestedAt?: number
+      }
+    >(localStorage.getItem(configKey)) ??
+    safeParse<
+      Partial<ModelConfig> & {
+        providerId?: string
+        providerName?: string
+        baseUrl?: string
+        apiKey?: string
+        model?: string
+        availableModels?: unknown
+        lastTestedAt?: number
+      }
+    >(localStorage.getItem(legacyConfigKey)) ??
+    safeParse<
+      Partial<ModelConfig> & {
+        providerId?: string
+        providerName?: string
+        baseUrl?: string
+        apiKey?: string
+        model?: string
+        availableModels?: unknown
+        lastTestedAt?: number
+      }
+    >(localStorage.getItem(olderConfigKey))
 
   if (!stored) {
-    return { ...defaultConfig }
+    return { ...defaultConfig, accounts: [] }
   }
 
-  const providerId = resolveProviderId(stored)
-  const provider = getProviderById(providerId)
-  const availableModels = normalizeModels(stored.availableModels)
-  const modelPool = availableModels.length ? availableModels : provider.models
-  const storedModel = typeof stored.model === 'string' && modelPool.includes(stored.model) ? stored.model : ''
+  const accounts = normalizeAccounts(stored.accounts)
+  if (!accounts.length && (stored.providerId || stored.providerName || stored.baseUrl || stored.model || stored.apiKey)) {
+    accounts.push(createAccountFromLegacyConfig(stored))
+  }
+
+  const activeAccountId =
+    typeof stored.activeAccountId === 'string' && accounts.some((account) => account.id === stored.activeAccountId)
+      ? stored.activeAccountId
+      : accounts[0]?.id ?? ''
 
   return {
-    providerId,
-    apiKey: typeof stored.apiKey === 'string' ? stored.apiKey : '',
-    model: storedModel || modelPool[0] || '',
-    availableModels,
+    activeAccountId,
+    accounts,
     temperature: typeof stored.temperature === 'number' ? stored.temperature : defaultConfig.temperature,
     maxTokens: typeof stored.maxTokens === 'number' ? stored.maxTokens : defaultConfig.maxTokens,
     systemPrompt: typeof stored.systemPrompt === 'string' ? stored.systemPrompt : defaultConfig.systemPrompt,
     stream: typeof stored.stream === 'boolean' ? stored.stream : defaultConfig.stream,
-    lastTestedAt: typeof stored.lastTestedAt === 'number' ? stored.lastTestedAt : undefined,
   }
 }
 
@@ -276,7 +358,69 @@ function normalizeModels(value: unknown) {
   return Array.from(new Set(value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)))
 }
 
-function resolveProviderId(stored: Partial<ModelConfig> & { providerName?: string; baseUrl?: string }) {
+function normalizeAccounts(value: unknown): ModelAccount[] {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map((item): ModelAccount | null => {
+      const raw = item as Partial<ModelAccount>
+      if (typeof raw.providerId !== 'string') return null
+
+      const provider = getProviderById(raw.providerId)
+      if (provider.id !== raw.providerId) return null
+
+      const availableModels = normalizeModels(raw.availableModels)
+      const modelPool = availableModels.length ? availableModels : provider.models
+      const storedModel = typeof raw.model === 'string' && modelPool.includes(raw.model) ? raw.model : ''
+      const now = Date.now()
+
+      return {
+        id: typeof raw.id === 'string' && raw.id ? raw.id : createId('account'),
+        providerId: provider.id,
+        name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 80) : provider.name,
+        apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : '',
+        model: storedModel || modelPool[0] || '',
+        availableModels,
+        createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : now,
+        updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : now,
+        lastTestedAt: typeof raw.lastTestedAt === 'number' ? raw.lastTestedAt : undefined,
+      }
+    })
+    .filter((account): account is ModelAccount => Boolean(account))
+}
+
+function createAccountFromLegacyConfig(
+  stored: Partial<ModelConfig> & {
+    providerId?: string
+    providerName?: string
+    baseUrl?: string
+    apiKey?: string
+    model?: string
+    availableModels?: unknown
+    lastTestedAt?: number
+  },
+): ModelAccount {
+  const providerId = resolveProviderId(stored)
+  const provider = getProviderById(providerId)
+  const availableModels = normalizeModels(stored.availableModels)
+  const modelPool = availableModels.length ? availableModels : provider.models
+  const storedModel = typeof stored.model === 'string' && modelPool.includes(stored.model) ? stored.model : ''
+  const now = Date.now()
+
+  return {
+    id: `account_${provider.id}_legacy`,
+    providerId: provider.id,
+    name: provider.name,
+    apiKey: typeof stored.apiKey === 'string' ? stored.apiKey : '',
+    model: storedModel || modelPool[0] || '',
+    availableModels,
+    createdAt: now,
+    updatedAt: now,
+    lastTestedAt: typeof stored.lastTestedAt === 'number' ? stored.lastTestedAt : undefined,
+  }
+}
+
+function resolveProviderId(stored: { providerId?: string; providerName?: string; baseUrl?: string }) {
   if (typeof stored.providerId === 'string' && providerPresets.some((provider) => provider.id === stored.providerId)) {
     return stored.providerId
   }
@@ -294,11 +438,29 @@ function resolveProviderId(stored: Partial<ModelConfig> & { providerName?: strin
     if (matched) return matched.id
   }
 
-  return defaultConfig.providerId
+  return 'deepseek'
 }
 
 function getProviderById(id: string) {
   return providerPresets.find((provider) => provider.id === id) ?? providerPresets[0]
+}
+
+function accountModels(account: Pick<ModelAccount, 'providerId' | 'availableModels'> | AccountDraft) {
+  const provider = getProviderById(account.providerId)
+  return account.availableModels.length ? account.availableModels : provider.models
+}
+
+function accountDisplayName(account: Pick<ModelAccount, 'providerId' | 'name'>) {
+  const provider = getProviderById(account.providerId)
+  return account.name && account.name !== provider.name ? `${account.name} · ${provider.name}` : provider.name
+}
+
+function accountTestLabel(account: ModelAccount) {
+  return account.lastTestedAt ? `上次测试 ${formatTime(account.lastTestedAt)}` : '未测试'
+}
+
+function makeModelValue(accountId: string, model: string) {
+  return `${accountId}::${model}`
 }
 
 function createId(prefix: string) {
@@ -347,51 +509,75 @@ function deleteSession(id: string) {
   }
 }
 
-function renameActiveSession() {
-  const session = activeSession.value
-  if (!session) return
-
-  const nextTitle = window.prompt('会话名称', session.title)?.trim()
-  if (!nextTitle) return
-
-  session.title = nextTitle.slice(0, 80)
-  session.updatedAt = Date.now()
-}
-
-function chooseProvider(providerId: string) {
-  const provider = getProviderById(providerId)
-  if (provider.id === modelConfig.value.providerId) return
-
-  modelConfig.value = {
-    ...modelConfig.value,
-    providerId: provider.id,
-    apiKey: '',
-    model: provider.models[0] ?? '',
-    availableModels: [],
-    lastTestedAt: undefined,
-  }
-  connectionStatus.value = {
-    state: 'idle',
-    text: '尚未测试连接。',
-  }
-}
-
 function resetConfig() {
-  modelConfig.value = { ...defaultConfig }
+  modelConfig.value.systemPrompt = defaultConfig.systemPrompt
+  modelConfig.value.temperature = defaultConfig.temperature
+  modelConfig.value.maxTokens = defaultConfig.maxTokens
+  modelConfig.value.stream = defaultConfig.stream
   connectionStatus.value = {
     state: 'idle',
-    text: '尚未测试连接。',
+    text: '已重置系统提示词。',
   }
 }
 
 function saveConfig() {
   localStorage.setItem(configKey, JSON.stringify(modelConfig.value))
-  configOpen.value = false
+  closeSettings()
 }
 
-async function testProviderConnection() {
-  const provider = selectedProvider.value
-  const apiKey = modelConfig.value.apiKey.trim()
+function closeSettings() {
+  configOpen.value = false
+  accountDialogOpen.value = false
+}
+
+function deleteActiveSessionFromSettings() {
+  const session = activeSession.value
+  if (!session) return
+
+  deleteSession(session.id)
+  closeSettings()
+}
+
+function openAccountDialog() {
+  accountDraft.value = createAccountDraft(activeModelAccount.value?.providerId ?? defaultConfigProviderId())
+  connectionStatus.value = {
+    state: 'idle',
+    text: '尚未测试连接。',
+  }
+  accountDialogOpen.value = true
+}
+
+function createAccountDraft(providerId = defaultConfigProviderId()): AccountDraft {
+  const provider = getProviderById(providerId)
+
+  return {
+    providerId: provider.id,
+    name: '',
+    apiKey: '',
+    model: provider.models[0] ?? '',
+    availableModels: [],
+  }
+}
+
+function defaultConfigProviderId() {
+  return activeModelAccount.value?.providerId ?? 'deepseek'
+}
+
+function updateDraftProvider() {
+  const provider = draftProvider.value
+  accountDraft.value.apiKey = ''
+  accountDraft.value.model = provider.models[0] ?? ''
+  accountDraft.value.availableModels = []
+  accountDraft.value.lastTestedAt = undefined
+  connectionStatus.value = {
+    state: 'idle',
+    text: '尚未测试连接。',
+  }
+}
+
+async function testDraftConnection() {
+  const provider = draftProvider.value
+  const apiKey = accountDraft.value.apiKey.trim()
 
   if (provider.requiresApiKey && !apiKey) {
     connectionStatus.value = {
@@ -424,9 +610,9 @@ async function testProviderConnection() {
     const remoteModels = extractModelIds(payload)
     const models = remoteModels.length ? remoteModels : provider.models
 
-    modelConfig.value.availableModels = models
-    modelConfig.value.model = models.includes(modelConfig.value.model) ? modelConfig.value.model : models[0] || ''
-    modelConfig.value.lastTestedAt = Date.now()
+    accountDraft.value.availableModels = models
+    accountDraft.value.model = models.includes(accountDraft.value.model) ? accountDraft.value.model : models[0] || ''
+    accountDraft.value.lastTestedAt = Date.now()
     connectionStatus.value = {
       state: 'success',
       text: remoteModels.length ? `连接成功，发现 ${remoteModels.length} 个模型。` : '连接成功，已使用推荐模型列表。',
@@ -441,12 +627,51 @@ async function testProviderConnection() {
   }
 }
 
+function saveAccountDraft() {
+  const provider = draftProvider.value
+  const models = normalizeModels(accountDraft.value.availableModels)
+  const modelPool = models.length ? models : provider.models
+  const model = modelPool.includes(accountDraft.value.model) ? accountDraft.value.model : modelPool[0] || ''
+  const sameProviderCount = modelConfig.value.accounts.filter((account) => account.providerId === provider.id).length
+  const now = Date.now()
+  const account: ModelAccount = {
+    id: createId('account'),
+    providerId: provider.id,
+    name: accountDraft.value.name.trim().slice(0, 80) || `${provider.name} ${sameProviderCount + 1}`,
+    apiKey: accountDraft.value.apiKey.trim(),
+    model,
+    availableModels: models,
+    createdAt: now,
+    updatedAt: now,
+    lastTestedAt: accountDraft.value.lastTestedAt,
+  }
+
+  modelConfig.value.accounts.push(account)
+  modelConfig.value.activeAccountId = account.id
+  accountDialogOpen.value = false
+}
+
+function openModelSelect() {
+  const select = modelSelect.value
+  if (!select || !modelConfig.value.accounts.length) return
+
+  select.focus()
+  select.showPicker?.()
+}
+
 async function sendMessage() {
   const content = draft.value.trim()
   const session = activeSession.value
   if (!content || !session || isGenerating.value) return
 
-  if (!selectedProvider.value.baseUrl.trim() || !modelConfig.value.model.trim()) {
+  const account = activeModelAccount.value
+  const provider = selectedProvider.value
+  if (!account || !provider || !provider.baseUrl.trim() || !account.model.trim()) {
+    configOpen.value = true
+    return
+  }
+
+  if (provider.requiresApiKey && !account.apiKey.trim()) {
     configOpen.value = true
     return
   }
@@ -474,6 +699,7 @@ async function sendMessage() {
   session.messages.push(userMessage, assistantMessage)
   session.updatedAt = Date.now()
   draft.value = ''
+  adjustComposerHeight()
   isGenerating.value = true
   scheduleScroll()
 
@@ -505,17 +731,21 @@ async function requestChatCompletion(
   controller: AbortController,
 ) {
   const config = modelConfig.value
-  const baseUrl = trimTrailingSlash(selectedProvider.value.baseUrl)
+  const account = activeModelAccount.value
+  const provider = account ? getProviderById(account.providerId) : null
+  if (!account || !provider) throw new Error('请先添加模型配置。')
+
+  const baseUrl = trimTrailingSlash(provider.baseUrl)
   const messages = buildProviderMessages(session, assistantMessage.id)
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     signal: controller.signal,
     headers: {
       'Content-Type': 'application/json',
-      ...(config.apiKey.trim() ? { Authorization: `Bearer ${config.apiKey.trim()}` } : {}),
+      ...(account.apiKey.trim() ? { Authorization: `Bearer ${account.apiKey.trim()}` } : {}),
     },
     body: JSON.stringify({
-      model: config.model,
+      model: account.model,
       messages,
       temperature: Number(config.temperature),
       max_tokens: Number(config.maxTokens) || undefined,
@@ -600,36 +830,8 @@ function stopGeneration() {
   activeAbortController.value?.abort()
 }
 
-function retryLastUserMessage() {
-  const session = activeSession.value
-  if (!session || isGenerating.value) return
-
-  const lastUserIndex = findLastIndex(session.messages, (message) => message.role === 'user')
-  if (lastUserIndex < 0) return
-
-  draft.value = session.messages[lastUserIndex].content
-  session.messages = session.messages.slice(0, lastUserIndex)
-  sendMessage()
-}
-
-function findLastIndex<T>(items: T[], predicate: (item: T) => boolean) {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (predicate(items[index])) return index
-  }
-
-  return -1
-}
-
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === 'AbortError'
-}
-
-async function copyMessage(message: ChatMessage) {
-  await navigator.clipboard.writeText(message.content)
-  copiedMessageId.value = message.id
-  window.setTimeout(() => {
-    if (copiedMessageId.value === message.id) copiedMessageId.value = ''
-  }, 1200)
 }
 
 function extractModelIds(payload: unknown) {
@@ -685,10 +887,29 @@ function scheduleScroll() {
     messagesEnd.value?.scrollIntoView({ block: 'end' })
   })
 }
+
+function adjustComposerHeight() {
+  nextTick(() => {
+    const textarea = composerTextarea.value
+    if (!textarea) return
+
+    textarea.style.height = 'auto'
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`
+  })
+}
 </script>
 
 <template>
   <main class="app-shell">
+    <button
+      v-if="sidebarOpen"
+      class="sidebar-backdrop"
+      type="button"
+      aria-label="关闭会话列表"
+      title="关闭会话列表"
+      @click="sidebarOpen = false"
+    />
+
     <aside :class="['session-panel', { open: sidebarOpen }]">
       <header class="panel-header">
         <div>
@@ -731,24 +952,14 @@ function scheduleScroll() {
 
         <div class="chat-title">
           <h2>{{ activeSession?.title ?? '对话' }}</h2>
-          <p>{{ activeSession ? formatTime(activeSession.updatedAt) : '' }}</p>
+          <div class="chat-subtitle">
+            <span>{{ activeSession ? formatTime(activeSession.updatedAt) : '' }}</span>
+          </div>
         </div>
 
         <div class="header-actions">
-          <button class="icon-button" type="button" aria-label="重命名会话" title="重命名会话" @click="renameActiveSession">
-            <Save :size="18" />
-          </button>
           <button class="icon-button" type="button" aria-label="模型设置" title="模型设置" @click="configOpen = true">
             <Settings :size="18" />
-          </button>
-          <button
-            class="icon-button danger"
-            type="button"
-            aria-label="删除会话"
-            title="删除会话"
-            @click="activeSession && deleteSession(activeSession.id)"
-          >
-            <Trash2 :size="18" />
           </button>
         </div>
       </header>
@@ -757,7 +968,7 @@ function scheduleScroll() {
         <section v-if="!hasMessages" class="empty-state">
           <MessageSquare :size="36" />
           <h3>开始对话</h3>
-          <p>{{ selectedProvider.name }} · {{ modelConfig.model || '未选择模型' }}</p>
+          <p>{{ activeModelLabel }}</p>
         </section>
 
         <article
@@ -766,20 +977,6 @@ function scheduleScroll() {
           :class="['message-row', message.role]"
         >
           <div class="message-bubble">
-            <header class="message-meta">
-              <span>{{ message.role === 'user' ? '我' : '助手' }}</span>
-              <button
-                v-if="message.content"
-                class="ghost-icon"
-                type="button"
-                aria-label="复制消息"
-                title="复制消息"
-                @click="copyMessage(message)"
-              >
-                <Check v-if="copiedMessageId === message.id" :size="15" />
-                <Copy v-else :size="15" />
-              </button>
-            </header>
             <p>{{ message.content || (message.status === 'streaming' ? '正在思考...' : '') }}</p>
             <small v-if="message.error" class="message-error">{{ message.error }}</small>
           </div>
@@ -788,135 +985,189 @@ function scheduleScroll() {
       </div>
 
       <footer class="composer">
-        <textarea
-          v-model="draft"
-          rows="1"
-          placeholder="输入消息..."
-          :disabled="isGenerating"
-          @keydown.enter.exact.prevent="sendMessage"
-        />
-        <div class="composer-actions">
+        <div class="composer-input">
+          <textarea
+            ref="composerTextarea"
+            v-model="draft"
+            rows="1"
+            placeholder="输入消息..."
+            :disabled="isGenerating"
+            @input="adjustComposerHeight"
+            @keydown.enter.exact.prevent="sendMessage"
+          />
+        </div>
+        <div class="composer-side-actions">
+          <select ref="modelSelect" v-model="activeModelValue" class="model-switcher-hidden" aria-label="选择模型" :disabled="!modelConfig.accounts.length">
+            <option value="" disabled>未配置模型</option>
+            <optgroup
+              v-for="account in modelConfig.accounts"
+              :key="account.id"
+              :label="accountDisplayName(account)"
+            >
+              <option
+                v-for="model in accountModels(account)"
+                :key="makeModelValue(account.id, model)"
+                :value="makeModelValue(account.id, model)"
+              >
+                {{ model }}
+              </option>
+            </optgroup>
+          </select>
           <button
-            class="secondary-button"
+            class="secondary-button composer-square-button model-square-button"
             type="button"
-            :disabled="!activeSession?.messages.length || isGenerating"
-            @click="retryLastUserMessage"
+            aria-label="选择模型"
+            title="选择模型"
+            :disabled="!modelConfig.accounts.length"
+            @click="openModelSelect"
           >
-            <RefreshCw :size="16" />
-            重试
+            {{ activeModelInitial }}
           </button>
-          <button v-if="isGenerating" class="primary-button stop" type="button" @click="stopGeneration">
+          <button v-if="isGenerating" class="primary-button composer-square-button stop" type="button" aria-label="停止" title="停止" @click="stopGeneration">
             <Square :size="16" />
-            停止
           </button>
-          <button v-else class="primary-button" type="button" :disabled="!draft.trim()" @click="sendMessage">
+          <button
+            v-else
+            class="primary-button composer-square-button"
+            type="button"
+            aria-label="发送"
+            title="发送"
+            :disabled="!draft.trim()"
+            @click="sendMessage"
+          >
             <Send :size="16" />
-            发送
           </button>
         </div>
       </footer>
     </section>
 
-    <section v-if="configOpen" class="settings-drawer" aria-label="模型设置">
+    <section v-if="configOpen" class="settings-drawer" aria-label="模型设置" @click.self="closeSettings">
       <div class="drawer-panel">
         <header>
           <div>
             <p class="eyebrow">模型</p>
             <h2>模型设置</h2>
           </div>
-          <button class="icon-button" type="button" aria-label="关闭设置" title="关闭设置" @click="configOpen = false">
+          <button class="icon-button" type="button" aria-label="关闭设置" title="关闭设置" @click="closeSettings">
             <X :size="18" />
           </button>
         </header>
 
         <section class="settings-section">
           <div class="section-heading">
-            <h3>模型厂商</h3>
-            <span>{{ selectedProvider.name }}</span>
+            <h3>模型配置</h3>
+            <button class="secondary-button compact" type="button" @click="openAccountDialog">
+              <Plus :size="15" />
+              添加
+            </button>
           </div>
-          <div class="provider-grid">
+
+          <div v-if="modelConfig.accounts.length" class="model-account-list">
             <button
-              v-for="provider in providerPresets"
-              :key="provider.id"
-              :class="['provider-card', { selected: provider.id === modelConfig.providerId }]"
+              v-for="account in modelConfig.accounts"
+              :key="account.id"
+              :class="['model-account-card', { selected: account.id === activeModelAccount?.id }]"
               type="button"
-              :aria-pressed="provider.id === modelConfig.providerId"
-              @click="chooseProvider(provider.id)"
+              :aria-pressed="account.id === activeModelAccount?.id"
+              @click="modelConfig.activeAccountId = account.id"
             >
-              <span class="provider-name">{{ provider.name }}</span>
-              <span class="provider-desc">{{ provider.description }}</span>
+              <span>
+                <strong>{{ accountDisplayName(account) }}</strong>
+                <small>{{ account.model || '未选择模型' }}</small>
+              </span>
+              <small>{{ accountTestLabel(account) }}</small>
             </button>
           </div>
+          <p v-else class="empty-copy">还没有模型配置。添加后可以在对话顶部切换厂商和模型。</p>
         </section>
 
         <section class="settings-section">
           <div class="section-heading">
-            <h3>连接信息</h3>
-            <span>{{ lastTestLabel }}</span>
+            <h3>系统提示词</h3>
           </div>
 
           <label>
-            接口地址
-            <span class="endpoint-box">{{ selectedProvider.baseUrl }}</span>
-          </label>
-
-          <label>
-            {{ selectedProvider.apiKeyLabel }}
-            <input v-model="modelConfig.apiKey" autocomplete="off" type="password" placeholder="请输入接口密钥" />
-          </label>
-
-          <div :class="['status-line', connectionStatus.state]">
-            <span>{{ connectionStatus.text }}</span>
-            <button class="secondary-button compact" type="button" :disabled="isTestingConnection" @click="testProviderConnection">
-              <RefreshCw :size="15" />
-              {{ isTestingConnection ? '测试中' : '测试连接' }}
-            </button>
-          </div>
-        </section>
-
-        <section class="settings-section">
-          <div class="section-heading">
-            <h3>模型参数</h3>
-            <span>{{ selectableModels.length }} 个可选模型</span>
-          </div>
-
-          <label>
-            当前模型
-            <select v-model="modelConfig.model">
-              <option v-for="model in selectableModels" :key="model" :value="model">{{ model }}</option>
-            </select>
-          </label>
-
-          <div class="field-grid">
-            <label>
-              温度
-              <input v-model.number="modelConfig.temperature" max="2" min="0" step="0.1" type="number" />
-            </label>
-            <label>
-              最大输出
-              <input v-model.number="modelConfig.maxTokens" min="1" step="128" type="number" />
-            </label>
-          </div>
-
-          <label>
-            系统提示词
-            <textarea v-model="modelConfig.systemPrompt" rows="4" />
-          </label>
-
-          <label class="toggle-row">
-            <input v-model="modelConfig.stream" type="checkbox" />
-            流式回复
+            <textarea v-model="modelConfig.systemPrompt" rows="5" />
           </label>
         </section>
 
-        <footer>
-          <button class="secondary-button" type="button" @click="resetConfig">重置</button>
-          <button class="primary-button" type="button" @click="saveConfig">
-            <Save :size="16" />
-            保存
+        <footer class="settings-footer">
+          <button class="danger-button compact-danger" type="button" :disabled="!activeSession" @click="deleteActiveSessionFromSettings">
+            <Trash2 :size="16" />
+            删除会话
           </button>
+          <div class="footer-actions">
+            <button class="secondary-button" type="button" @click="resetConfig">重置</button>
+            <button class="primary-button" type="button" @click="saveConfig">
+              <Save :size="16" />
+              保存
+            </button>
+          </div>
         </footer>
       </div>
+
+      <section v-if="accountDialogOpen" class="account-dialog-layer" aria-label="添加模型配置" @click.self="accountDialogOpen = false">
+        <div class="account-dialog">
+          <header>
+            <div>
+              <p class="eyebrow">配置</p>
+              <h2>添加模型配置</h2>
+            </div>
+            <button class="icon-button" type="button" aria-label="关闭添加配置" title="关闭添加配置" @click="accountDialogOpen = false">
+              <X :size="18" />
+            </button>
+          </header>
+
+          <section class="settings-section">
+            <label>
+              配置名称
+              <input v-model="accountDraft.name" type="text" placeholder="例如：DeepSeek 工作号" />
+            </label>
+
+            <label>
+              模型厂商
+              <select v-model="accountDraft.providerId" @change="updateDraftProvider">
+                <option v-for="provider in providerPresets" :key="provider.id" :value="provider.id">
+                  {{ provider.name }}
+                </option>
+              </select>
+            </label>
+
+            <label>
+              接口地址
+              <span class="endpoint-box">{{ draftProvider.baseUrl }}</span>
+            </label>
+
+            <label>
+              {{ draftProvider.apiKeyLabel }}
+              <input v-model="accountDraft.apiKey" autocomplete="off" type="password" placeholder="请输入接口密钥" />
+            </label>
+
+            <div :class="['status-line', connectionStatus.state]">
+              <span>{{ connectionStatus.text }}</span>
+              <button class="secondary-button compact" type="button" :disabled="isTestingConnection" @click="testDraftConnection">
+                <RefreshCw :size="15" />
+                {{ isTestingConnection ? '测试中' : '测试连接' }}
+              </button>
+            </div>
+
+            <label>
+              默认模型
+              <select v-model="accountDraft.model">
+                <option v-for="model in draftModels" :key="model" :value="model">{{ model }}</option>
+              </select>
+            </label>
+          </section>
+
+          <footer>
+            <button class="secondary-button" type="button" @click="accountDialogOpen = false">取消</button>
+            <button class="primary-button" type="button" @click="saveAccountDraft">
+              <Save :size="16" />
+              保存配置
+            </button>
+          </footer>
+        </div>
+      </section>
     </section>
   </main>
 </template>

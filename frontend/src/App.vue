@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
+  CheckCircle2,
+  CircleAlert,
+  LoaderCircle,
   Menu,
   MessageSquare,
   Plus,
@@ -12,10 +15,14 @@ import {
   Trash2,
   X,
 } from '@lucide/vue'
+import { createBuiltinTools } from './agent/builtinTools'
+import { runAgentTurn } from './agent/runner'
+import type { AgentMessage, AgentRunEvent } from './agent/types'
 
-type Role = 'user' | 'assistant'
+type Role = 'user' | 'assistant' | 'tool'
 type MessageStatus = 'complete' | 'streaming' | 'error'
 type ConnectionState = 'idle' | 'testing' | 'success' | 'error'
+type ToolStatus = 'running' | 'done' | 'error'
 
 interface ChatMessage {
   id: string
@@ -24,6 +31,13 @@ interface ChatMessage {
   createdAt: number
   status: MessageStatus
   error?: string
+  toolName?: string
+  toolCallId?: string
+  toolArgs?: unknown
+  toolResult?: unknown
+  toolStatus?: ToolStatus
+  toolDuration?: number
+  toolError?: string
 }
 
 interface ChatSession {
@@ -84,6 +98,13 @@ const legacySessionsKey = 'family-agent.sessions.v1'
 const configKey = 'morun.model-config.v2'
 const legacyConfigKey = 'family-agent.model-config.v2'
 const olderConfigKey = 'family-agent.model-config.v1'
+const agentTools = createBuiltinTools()
+const toolTitles: Record<string, string> = {
+  calculate: '安全计算',
+  get_current_time: '读取当前时间',
+  recall_notes: '检索记忆',
+  remember_note: '保存记忆',
+}
 
 const providerPresets: ProviderPreset[] = [
   {
@@ -165,7 +186,7 @@ const defaultConfig: ModelConfig = {
   accounts: [],
   temperature: 0.7,
   maxTokens: 4096,
-  systemPrompt: '你是一个运行在手机上的智能助手，回答要清晰、可靠、适合移动端阅读。',
+  systemPrompt: '你是一个运行在手机上的智能助手，回答要清晰、可靠、适合移动端阅读。需要时可以调用安全内置工具获取时间、计算、保存或检索本地记忆。',
   stream: true,
 }
 
@@ -707,15 +728,40 @@ async function sendMessage() {
   activeAbortController.value = controller
 
   try {
-    await requestChatCompletion(session, assistantMessage, controller)
-    assistantMessage.status = 'complete'
+    await runAgentTurn({
+      messages: buildAgentMessages(session, assistantMessage.id),
+      modelConfig: {
+        baseUrl: provider.baseUrl,
+        apiKey: account.apiKey,
+        model: account.model,
+        temperature: modelConfig.value.temperature,
+        maxTokens: modelConfig.value.maxTokens,
+      },
+      tools: agentTools,
+      signal: controller.signal,
+      toolContext: {
+        storage: localStorage,
+      },
+      onEvent: (event) => {
+        handleAgentEvent(session, assistantMessage, event)
+      },
+    })
+
+    if (hasMessage(session, assistantMessage.id)) {
+      assistantMessage.status = 'complete'
+    }
   } catch (error) {
+    const target = hasMessage(session, assistantMessage.id) ? assistantMessage : createAssistantMessage()
+    if (!hasMessage(session, target.id)) {
+      session.messages.push(target)
+    }
+
     if (isAbortError(error)) {
-      assistantMessage.status = assistantMessage.content ? 'complete' : 'error'
-      assistantMessage.error = assistantMessage.content ? undefined : '生成已停止。'
+      target.status = target.content ? 'complete' : 'error'
+      target.error = target.content ? undefined : '生成已停止。'
     } else {
-      assistantMessage.status = 'error'
-      assistantMessage.error = formatRequestError(error)
+      target.status = 'error'
+      target.error = formatRequestError(error)
     }
   } finally {
     session.updatedAt = Date.now()
@@ -725,51 +771,20 @@ async function sendMessage() {
   }
 }
 
-async function requestChatCompletion(
-  session: ChatSession,
-  assistantMessage: ChatMessage,
-  controller: AbortController,
-) {
-  const config = modelConfig.value
-  const account = activeModelAccount.value
-  const provider = account ? getProviderById(account.providerId) : null
-  if (!account || !provider) throw new Error('请先添加模型配置。')
-
-  const baseUrl = trimTrailingSlash(provider.baseUrl)
-  const messages = buildProviderMessages(session, assistantMessage.id)
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    signal: controller.signal,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(account.apiKey.trim() ? { Authorization: `Bearer ${account.apiKey.trim()}` } : {}),
-    },
-    body: JSON.stringify({
-      model: account.model,
-      messages,
-      temperature: Number(config.temperature),
-      max_tokens: Number(config.maxTokens) || undefined,
-      stream: config.stream,
-    }),
-  })
-
-  if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(errorText || `HTTP ${response.status}`)
+function createAssistantMessage(): ChatMessage {
+  return {
+    id: createId('message'),
+    role: 'assistant',
+    content: '',
+    createdAt: Date.now(),
+    status: 'streaming',
   }
-
-  if (!config.stream || !response.body) {
-    const payload = await response.json()
-    assistantMessage.content = payload?.choices?.[0]?.message?.content ?? ''
-    return
-  }
-
-  await readStream(response, assistantMessage)
 }
 
-function buildProviderMessages(session: ChatSession, assistantMessageId: string) {
+function buildAgentMessages(session: ChatSession, assistantMessageId: string): AgentMessage[] {
   const messages = session.messages
     .filter((message) => message.id !== assistantMessageId)
+    .filter((message) => message.role !== 'tool')
     .filter((message) => message.content.trim())
     .map((message) => ({
       role: message.role,
@@ -789,41 +804,88 @@ function buildProviderMessages(session: ChatSession, assistantMessageId: string)
   return messages
 }
 
-async function readStream(response: Response, assistantMessage: ChatMessage) {
-  if (!response.body) return
-
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split(/\r?\n/)
-    buffer = lines.pop() ?? ''
-
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed.startsWith('data:')) continue
-
-      const payload = trimmed.slice(5).trim()
-      if (payload === '[DONE]') return
-
-      try {
-        const parsed = JSON.parse(payload)
-        const delta = parsed?.choices?.[0]?.delta?.content ?? ''
-        if (delta) {
-          assistantMessage.content += delta
-          activeSession.value!.updatedAt = Date.now()
-          scheduleScroll()
-        }
-      } catch {
-        // 部分兼容接口会发心跳片段，跳过即可。
-      }
-    }
+function handleAgentEvent(session: ChatSession, assistantMessage: ChatMessage, event: AgentRunEvent) {
+  if (event.type === 'fallback_without_tools') {
+    return
   }
+
+  if (event.type === 'assistant_message') {
+    appendOrCompleteAssistantMessage(session, assistantMessage, event.content)
+    return
+  }
+
+  if (event.type === 'tool_started') {
+    removeEmptyAssistantPlaceholder(session, assistantMessage.id)
+    session.messages.push({
+      id: createId('message'),
+      role: 'tool',
+      content: '',
+      createdAt: Date.now(),
+      status: 'streaming',
+      toolName: event.toolCall.name,
+      toolCallId: event.toolCall.id,
+      toolArgs: event.toolCall.arguments,
+      toolStatus: 'running',
+    })
+    session.updatedAt = Date.now()
+    scheduleScroll()
+    return
+  }
+
+  updateToolMessage(session, event)
+}
+
+function appendOrCompleteAssistantMessage(session: ChatSession, assistantMessage: ChatMessage, content: string) {
+  const existing = session.messages.find((message) => message.id === assistantMessage.id)
+  if (existing) {
+    existing.content = content
+    existing.status = 'complete'
+  } else {
+    session.messages.push({
+      id: createId('message'),
+      role: 'assistant',
+      content,
+      createdAt: Date.now(),
+      status: 'complete',
+    })
+  }
+
+  session.updatedAt = Date.now()
+  scheduleScroll()
+}
+
+function updateToolMessage(session: ChatSession, event: Extract<AgentRunEvent, { type: 'tool_completed' | 'tool_failed' }>) {
+  const message = session.messages.find(
+    (item) => item.role === 'tool' && item.toolCallId === event.toolCall.id && item.toolStatus === 'running',
+  )
+  if (!message) return
+
+  message.status = event.type === 'tool_completed' ? 'complete' : 'error'
+  message.toolStatus = event.type === 'tool_completed' ? 'done' : 'error'
+  message.toolDuration = event.durationMs / 1000
+
+  if (event.type === 'tool_completed') {
+    message.content = event.output.text
+    message.toolResult = event.output.data ?? event.output.text
+  } else {
+    message.content = event.error
+    message.toolError = event.error
+    message.error = event.error
+  }
+
+  session.updatedAt = Date.now()
+  scheduleScroll()
+}
+
+function removeEmptyAssistantPlaceholder(session: ChatSession, assistantMessageId: string) {
+  const placeholder = session.messages.find((message) => message.id === assistantMessageId)
+  if (!placeholder || placeholder.content.trim() || placeholder.error) return
+
+  session.messages = session.messages.filter((message) => message.id !== assistantMessageId)
+}
+
+function hasMessage(session: ChatSession, messageId: string) {
+  return session.messages.some((message) => message.id === messageId)
 }
 
 function stopGeneration() {
@@ -871,6 +933,240 @@ function formatRequestError(error: unknown) {
 
 function shortenError(message: string) {
   return message.replace(/\s+/g, ' ').slice(0, 180)
+}
+
+function toolStatusLabel(message: ChatMessage) {
+  if (message.toolStatus === 'running') return '运行中'
+  if (message.toolStatus === 'error') return '失败'
+  return '完成'
+}
+
+function toolDisplayName(message: ChatMessage) {
+  return message.toolName || 'tool'
+}
+
+function toolDisplayTitle(message: ChatMessage) {
+  const name = toolDisplayName(message)
+  return toolTitles[name] ?? name
+}
+
+function toolSubtitle(message: ChatMessage) {
+  if (message.toolStatus === 'running') {
+    return formatToolArgsInline(message) || '正在执行工具调用'
+  }
+
+  if (message.toolStatus === 'error') {
+    return shortenOneLine(message.toolError || message.content || '工具执行失败。', 108)
+  }
+
+  return shortenOneLine(message.content || stringifyCompact(message.toolResult) || '工具执行完成。', 108)
+}
+
+function toolStatusSummary(message: ChatMessage) {
+  const duration = formatToolDuration(message)
+  return duration ? `${toolStatusLabel(message)} · ${duration}` : toolStatusLabel(message)
+}
+
+function hasToolDetails(message: ChatMessage) {
+  return Boolean(formatToolArgs(message) || formatToolOutput(message))
+}
+
+function formatToolArgs(message: ChatMessage) {
+  return stringifyCompact(message.toolArgs)
+}
+
+function formatToolArgsInline(message: ChatMessage) {
+  const args = message.toolArgs
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return shortenOneLine(stringifyCompact(args), 96)
+  }
+
+  const pairs = Object.entries(args as Record<string, unknown>)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .slice(0, 3)
+    .map(([key, value]) => `${key}: ${typeof value === 'string' || typeof value === 'number' ? value : JSON.stringify(value)}`)
+
+  return shortenOneLine(pairs.join(' · '), 96)
+}
+
+function formatToolOutput(message: ChatMessage) {
+  return message.toolError || message.content || stringifyCompact(message.toolResult)
+}
+
+function formatToolDuration(message: ChatMessage) {
+  if (typeof message.toolDuration !== 'number') return ''
+  if (message.toolDuration > 0 && message.toolDuration < 0.1) return '<0.1s'
+  return `${message.toolDuration.toFixed(1)}s`
+}
+
+function stringifyCompact(value: unknown) {
+  if (value === undefined || value === null || value === '') return ''
+  if (typeof value === 'string') return shortenToolText(value)
+
+  try {
+    return shortenToolText(JSON.stringify(value, null, 2))
+  } catch {
+    return shortenToolText(String(value))
+  }
+}
+
+function shortenToolText(value: string) {
+  const normalized = value.trim()
+  return normalized.length > 520 ? `${normalized.slice(0, 520)}...` : normalized
+}
+
+function shortenOneLine(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized
+}
+
+function renderMarkdown(value: string) {
+  const source = value.trim()
+  if (!source) return ''
+
+  const lines = source.replace(/\r\n?/g, '\n').split('\n')
+  const html: string[] = []
+  let paragraph: string[] = []
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return
+    html.push(`<p>${renderInlineMarkdown(paragraph.join('\n')).replace(/\n/g, '<br>')}</p>`)
+    paragraph = []
+  }
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const trimmed = line.trim()
+    const fence = trimmed.match(/^```([\w-]+)?\s*$/)
+
+    if (fence) {
+      flushParagraph()
+      const codeLines: string[] = []
+      index += 1
+      while (index < lines.length && !lines[index].trim().startsWith('```')) {
+        codeLines.push(lines[index])
+        index += 1
+      }
+      html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+      continue
+    }
+
+    if (!trimmed) {
+      flushParagraph()
+      continue
+    }
+
+    const heading = trimmed.match(/^(#{1,4})\s+(.+)$/)
+    if (heading) {
+      flushParagraph()
+      const level = heading[1].length
+      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`)
+      continue
+    }
+
+    if (/^([-*_])\s*\1\s*\1\s*$/.test(trimmed)) {
+      flushParagraph()
+      html.push('<hr>')
+      continue
+    }
+
+    const unorderedItems: string[] = []
+    while (index < lines.length) {
+      const item = lines[index].match(/^\s*[-*]\s+(.+)$/)
+      if (!item) break
+      unorderedItems.push(`<li>${renderInlineMarkdown(item[1])}</li>`)
+      index += 1
+    }
+    if (unorderedItems.length) {
+      flushParagraph()
+      html.push(`<ul>${unorderedItems.join('')}</ul>`)
+      index -= 1
+      continue
+    }
+
+    const orderedItems: string[] = []
+    while (index < lines.length) {
+      const item = lines[index].match(/^\s*\d+\.\s+(.+)$/)
+      if (!item) break
+      orderedItems.push(`<li>${renderInlineMarkdown(item[1])}</li>`)
+      index += 1
+    }
+    if (orderedItems.length) {
+      flushParagraph()
+      html.push(`<ol>${orderedItems.join('')}</ol>`)
+      index -= 1
+      continue
+    }
+
+    const quoteLines: string[] = []
+    while (index < lines.length) {
+      const quote = lines[index].match(/^\s*>\s?(.*)$/)
+      if (!quote) break
+      quoteLines.push(quote[1])
+      index += 1
+    }
+    if (quoteLines.length) {
+      flushParagraph()
+      html.push(`<blockquote>${renderMarkdown(quoteLines.join('\n'))}</blockquote>`)
+      index -= 1
+      continue
+    }
+
+    paragraph.push(line)
+  }
+
+  flushParagraph()
+  return html.join('')
+}
+
+function renderInlineMarkdown(value: string) {
+  const placeholders: string[] = []
+  const hold = (html: string) => {
+    const key = `\u0000${placeholders.length}\u0000`
+    placeholders.push(html)
+    return key
+  }
+
+  let text = value.replace(/`([^`\n]+)`/g, (_match, code: string) => hold(`<code>${escapeHtml(code)}</code>`))
+
+  text = text.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, label: string, href: string) => {
+    const safeHref = sanitizeMarkdownHref(href)
+    if (!safeHref) return match
+    return hold(
+      `<a href="${escapeAttribute(safeHref)}" target="_blank" rel="noreferrer noopener">${escapeHtml(label)}</a>`,
+    )
+  })
+
+  let html = escapeHtml(text)
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^_\n]+)__/g, '<strong>$1</strong>')
+    .replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
+    .replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
+    .replace(/(^|[^_])_([^_\n]+)_(?!_)/g, '$1<em>$2</em>')
+
+  placeholders.forEach((placeholder, index) => {
+    html = html.replaceAll(`\u0000${index}\u0000`, placeholder)
+  })
+
+  return html
+}
+
+function sanitizeMarkdownHref(value: string) {
+  const trimmed = value.trim()
+  return /^(https?:|mailto:|tel:)/i.test(trimmed) ? trimmed : ''
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function escapeAttribute(value: string) {
+  return escapeHtml(value)
 }
 
 function formatTime(value: number) {
@@ -976,8 +1272,36 @@ function adjustComposerHeight() {
           :key="message.id"
           :class="['message-row', message.role]"
         >
-          <div class="message-bubble">
-            <p>{{ message.content || (message.status === 'streaming' ? '正在思考...' : '') }}</p>
+          <div v-if="message.role === 'tool'" :class="['tool-card', message.toolStatus]">
+            <div class="tool-card-header">
+              <span :class="['tool-state-icon', message.toolStatus]">
+                <LoaderCircle v-if="message.toolStatus === 'running'" :size="16" />
+                <CircleAlert v-else-if="message.toolStatus === 'error'" :size="16" />
+                <CheckCircle2 v-else :size="16" />
+              </span>
+              <span class="tool-title">
+                <strong>{{ toolDisplayTitle(message) }}</strong>
+                <small>{{ toolSubtitle(message) }}</small>
+              </span>
+              <span class="tool-status">{{ toolStatusSummary(message) }}</span>
+            </div>
+            <details v-if="hasToolDetails(message)" class="tool-details" :open="message.toolStatus === 'error'">
+              <summary>调用详情</summary>
+              <div v-if="formatToolArgs(message)" class="tool-detail-block">
+                <span>参数</span>
+                <pre>{{ formatToolArgs(message) }}</pre>
+              </div>
+              <div v-if="formatToolOutput(message)" class="tool-detail-block">
+                <span>{{ message.toolStatus === 'error' ? '错误' : '结果' }}</span>
+                <pre>{{ formatToolOutput(message) }}</pre>
+              </div>
+            </details>
+          </div>
+          <div v-else class="message-bubble">
+            <div
+              class="markdown-body"
+              v-html="renderMarkdown(message.content || (message.status === 'streaming' ? '正在思考...' : ''))"
+            />
             <small v-if="message.error" class="message-error">{{ message.error }}</small>
           </div>
         </article>

@@ -7,7 +7,7 @@ interface AgentNote {
   createdAt: string
 }
 
-const notesKey = 'morun.agent-notes.v1'
+export const notesKey = 'morun.agent-notes.v1'
 const maxExpressionLength = 160
 
 export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage' | 'now'> = {}): ToolDefinition[] {
@@ -15,6 +15,9 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
     {
       name: 'get_current_time',
       description: '获取当前时间。可以指定 IANA 时区，例如 Asia/Shanghai 或 America/New_York。',
+      source: 'builtin',
+      riskLevel: 'safe',
+      requiresConfirmation: false,
       parameters: {
         type: 'object',
         properties: {
@@ -49,6 +52,9 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
     {
       name: 'calculate',
       description: '计算一个安全的数学表达式。只支持数字、括号、+、-、*、/、% 和一元正负号。',
+      source: 'builtin',
+      riskLevel: 'safe',
+      requiresConfirmation: false,
       parameters: {
         type: 'object',
         properties: {
@@ -79,6 +85,9 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
     {
       name: 'remember_note',
       description: '把一条用户希望保留的偏好、事实或备忘保存到本地记忆。',
+      source: 'builtin',
+      riskLevel: 'low',
+      requiresConfirmation: false,
       parameters: {
         type: 'object',
         properties: {
@@ -122,6 +131,9 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
     {
       name: 'recall_notes',
       description: '从本地记忆中检索之前保存的偏好、事实或备忘。',
+      source: 'builtin',
+      riskLevel: 'safe',
+      requiresConfirmation: false,
       parameters: {
         type: 'object',
         properties: {
@@ -158,6 +170,35 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
           data: {
             query,
             notes: matched,
+          },
+        }
+      },
+    },
+    {
+      name: 'clear_notes',
+      description: '清空所有本地记忆。这个操作需要用户确认。',
+      source: 'builtin',
+      riskLevel: 'medium',
+      requiresConfirmation: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: {
+            type: 'string',
+            description: '清空记忆的原因。',
+          },
+        },
+        additionalProperties: false,
+      },
+      execute: async (_args, runtimeContext) => {
+        const storage = resolveStorage(context.storage ?? runtimeContext.storage)
+        const notes = loadNotes(storage)
+        storage.setItem(notesKey, JSON.stringify([]))
+
+        return {
+          text: `已清空 ${notes.length} 条本地记忆。`,
+          data: {
+            cleared: notes.length,
           },
         }
       },

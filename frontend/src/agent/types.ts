@@ -15,6 +15,9 @@ export interface ToolCall {
   rawArguments: string
 }
 
+export type ToolSource = 'builtin' | 'native' | 'termux' | 'mcp' | 'plugin'
+export type ToolRiskLevel = 'safe' | 'low' | 'medium' | 'high'
+
 export interface JsonSchema {
   type?: string
   description?: string
@@ -36,6 +39,7 @@ export interface ToolExecutionContext {
 export interface StorageLike {
   getItem(key: string): string | null
   setItem(key: string, value: string): void
+  removeItem?(key: string): void
 }
 
 export interface ToolExecutionResult {
@@ -47,6 +51,9 @@ export interface ToolDefinition {
   name: string
   description: string
   parameters: JsonSchema
+  source: ToolSource
+  riskLevel: ToolRiskLevel
+  requiresConfirmation: boolean
   execute(args: unknown, context: ToolExecutionContext): Promise<ToolExecutionResult>
 }
 
@@ -56,9 +63,19 @@ export interface AgentModelConfig {
   model: string
   temperature: number
   maxTokens: number
+  stream: boolean
 }
 
 export type AgentRunEvent =
+  | {
+      type: 'run_started'
+      runId: string
+    }
+  | {
+      type: 'assistant_delta'
+      contentDelta: string
+      accumulatedContent: string
+    }
   | {
       type: 'assistant_message'
       content: string
@@ -66,6 +83,12 @@ export type AgentRunEvent =
   | {
       type: 'tool_started'
       toolCall: ToolCall
+      tool: ToolDefinition
+    }
+  | {
+      type: 'tool_confirmation_required'
+      toolCall: ToolCall
+      tool: ToolDefinition
     }
   | {
       type: 'tool_completed'
@@ -83,6 +106,15 @@ export type AgentRunEvent =
       type: 'fallback_without_tools'
       reason: string
     }
+  | {
+      type: 'run_aborted'
+    }
+  | {
+      type: 'run_completed'
+      content: string
+      usedTools: boolean
+      fellBackWithoutTools: boolean
+    }
 
 export interface ChatCompletionResult {
   content: string
@@ -95,6 +127,7 @@ export interface ChatCompletionRequest {
   tools: ToolDefinition[]
   signal?: AbortSignal
   useTools: boolean
+  onContentDelta?: (delta: { contentDelta: string; accumulatedContent: string }) => void
 }
 
 export type ChatCompletionClient = (request: ChatCompletionRequest) => Promise<ChatCompletionResult>

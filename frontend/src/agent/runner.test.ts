@@ -9,11 +9,15 @@ const modelConfig = {
   model: 'test-model',
   temperature: 0.7,
   maxTokens: 1024,
+  stream: false,
 }
 
 const echoTool: ToolDefinition = {
   name: 'echo',
   description: 'Echo text.',
+  source: 'builtin',
+  riskLevel: 'safe',
+  requiresConfirmation: false,
   parameters: {
     type: 'object',
     properties: {
@@ -38,6 +42,9 @@ const echoTool: ToolDefinition = {
 const failingTool: ToolDefinition = {
   name: 'fail',
   description: 'Always fail.',
+  source: 'builtin',
+  riskLevel: 'low',
+  requiresConfirmation: false,
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -45,6 +52,21 @@ const failingTool: ToolDefinition = {
   execute: async () => {
     throw new Error('boom')
   },
+}
+
+const guardedTool: ToolDefinition = {
+  name: 'guarded',
+  description: 'Requires confirmation.',
+  source: 'builtin',
+  riskLevel: 'medium',
+  requiresConfirmation: true,
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+  },
+  execute: async () => ({
+    text: 'guarded done',
+  }),
 }
 
 describe('runAgentTurn', () => {
@@ -100,7 +122,13 @@ describe('runAgentTurn', () => {
 
     expect(result.content).toBe('final')
     expect(result.usedTools).toBe(true)
-    expect(events.map((event) => event.type)).toEqual(['tool_started', 'tool_completed', 'assistant_message'])
+    expect(events.map((event) => event.type)).toEqual([
+      'run_started',
+      'tool_started',
+      'tool_completed',
+      'assistant_message',
+      'run_completed',
+    ])
     expect(result.messages.some((message) => message.role === 'tool' && message.toolName === 'echo')).toBe(true)
   })
 
@@ -171,7 +199,13 @@ describe('runAgentTurn', () => {
     })
 
     expect(result.content).toBe('recovered')
-    expect(events.map((event) => event.type)).toEqual(['tool_started', 'tool_failed', 'assistant_message'])
+    expect(events.map((event) => event.type)).toEqual([
+      'run_started',
+      'tool_started',
+      'tool_failed',
+      'assistant_message',
+      'run_completed',
+    ])
     expect(result.messages.find((message) => message.role === 'tool')?.content).toContain('boom')
   })
 
@@ -223,5 +257,80 @@ describe('runAgentTurn', () => {
     expect(result.content).toBe('fallback reply')
     expect(result.fellBackWithoutTools).toBe(true)
     expect(useToolsValues).toEqual([true, false])
+  })
+
+  it('executes a guarded tool after user approval', async () => {
+    const events: AgentRunEvent[] = []
+    let calls = 0
+    const client: ChatCompletionClient = async () => {
+      calls += 1
+      if (calls === 1) {
+        return {
+          content: '',
+          toolCalls: [
+            {
+              id: 'call_guarded',
+              name: 'guarded',
+              rawArguments: '{}',
+              arguments: {},
+            },
+          ],
+        }
+      }
+      return {
+        content: 'approved final',
+        toolCalls: [],
+      }
+    }
+
+    const result = await runAgentTurn({
+      messages: [{ role: 'user', content: 'guarded' }],
+      modelConfig,
+      tools: [guardedTool],
+      client,
+      requestToolConfirmation: async () => 'approved',
+      onEvent: (event) => events.push(event),
+    })
+
+    expect(result.content).toBe('approved final')
+    expect(events.map((event) => event.type)).toContain('tool_confirmation_required')
+    expect(result.messages.find((message) => message.role === 'tool')?.content).toContain('guarded done')
+  })
+
+  it('skips a guarded tool after user denial and lets the model recover', async () => {
+    let calls = 0
+    const client: ChatCompletionClient = async () => {
+      calls += 1
+      if (calls === 1) {
+        return {
+          content: '',
+          toolCalls: [
+            {
+              id: 'call_guarded',
+              name: 'guarded',
+              rawArguments: '{}',
+              arguments: {},
+            },
+          ],
+        }
+      }
+      return {
+        content: 'denied final',
+        toolCalls: [],
+      }
+    }
+
+    const result = await runAgentTurn({
+      messages: [{ role: 'user', content: 'guarded' }],
+      modelConfig,
+      tools: [guardedTool],
+      client,
+      requestToolConfirmation: async () => 'denied',
+    })
+
+    const toolMessage = result.messages.find((message) => message.role === 'tool')
+    expect(result.content).toBe('denied final')
+    expect(toolMessage?.content).toContain('用户拒绝执行工具')
+    expect(toolMessage?.content).not.toContain('guarded done')
   })
 })

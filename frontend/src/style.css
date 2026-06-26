@@ -841,6 +841,71 @@ h3 {
   justify-content: flex-end;
 }
 
+.confirmation-layer {
+  align-items: center;
+  animation: fade-in 160ms ease both;
+  background: rgba(39, 34, 28, 0.34);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 18px;
+  position: fixed;
+  z-index: 14;
+}
+
+.confirmation-dialog {
+  background: var(--panel);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 440px;
+  padding: 18px;
+  width: min(100%, 440px);
+}
+
+.confirmation-dialog > header,
+.confirmation-dialog footer {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.confirmation-dialog footer {
+  justify-content: flex-end;
+}
+
+.confirmation-body {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+}
+
+.confirmation-body p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.confirmation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.confirmation-meta span {
+  background: var(--panel-deep);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 800;
+  padding: 4px 8px;
+}
+
 .settings-section {
   border-top: 1px solid var(--line);
   display: grid;

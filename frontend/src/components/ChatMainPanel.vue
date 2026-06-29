@@ -183,10 +183,12 @@ watch(
   () => {
     followLatest.value = true
     shouldStickToBottom.value = true
+    modelPickerOpen.value = false
+    questionDialogMessage.value = null
     pageIndex.value = lastPageIndex.value
     scrollToEnd()
   },
-  { flush: 'post' },
+  { flush: 'post', immediate: true },
 )
 
 watch(

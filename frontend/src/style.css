@@ -1359,6 +1359,7 @@ h3 {
 @media (max-width: 780px) {
   .app-shell {
     display: block;
+    touch-action: pan-y;
   }
 
   .sidebar-backdrop {

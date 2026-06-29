@@ -68,6 +68,15 @@ interface PendingToolConfirmation {
   resolve: (decision: ToolConfirmationDecision) => void
 }
 
+interface SwipeGestureState {
+  active: boolean
+  pointerId: number | null
+  startX: number
+  startY: number
+  latestX: number
+  latestY: number
+}
+
 const chatStore = useChatStore()
 const {
   modelConfig,
@@ -97,6 +106,14 @@ const isTestingConnection = ref(false)
 const activeAbortController = ref<AbortController | null>(null)
 const pendingToolConfirmation = ref<PendingToolConfirmation | null>(null)
 const chatPanel = ref<InstanceType<typeof ChatMainPanel> | null>(null)
+const swipeGesture = ref<SwipeGestureState>({
+  active: false,
+  pointerId: null,
+  startX: 0,
+  startY: 0,
+  latestX: 0,
+  latestY: 0,
+})
 const connectionStatus = ref<ConnectionStatus>({
   state: 'idle',
   text: '尚未测试连接。',
@@ -843,10 +860,119 @@ function scheduleScroll() {
 function adjustComposerHeight() {
   chatPanel.value?.adjustComposerHeight()
 }
+
+function isMobileGestureViewport() {
+  return window.matchMedia('(max-width: 780px)').matches
+}
+
+function shouldIgnoreSwipeStart(target: EventTarget | null) {
+  const element = target instanceof Element ? target : null
+  return Boolean(
+    element?.closest(
+      [
+        'input',
+        'textarea',
+        'select',
+        '.account-dialog-layer',
+        '.confirmation-layer',
+        '.model-picker-layer',
+        '.question-dialog-layer',
+        '.termux-config-dialog-layer',
+        '.tool-catalog-dialog-layer',
+      ].join(', '),
+    ),
+  )
+}
+
+function beginSwipeGesture(event: PointerEvent) {
+  if (
+    event.pointerType !== 'touch' ||
+    !event.isPrimary ||
+    !isMobileGestureViewport() ||
+    shouldIgnoreSwipeStart(event.target)
+  ) {
+    return
+  }
+
+  swipeGesture.value = {
+    active: true,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    latestX: event.clientX,
+    latestY: event.clientY,
+  }
+}
+
+function updateSwipeGesture(event: PointerEvent) {
+  const gesture = swipeGesture.value
+  if (!gesture.active || gesture.pointerId !== event.pointerId) return
+
+  gesture.latestX = event.clientX
+  gesture.latestY = event.clientY
+
+  const deltaX = gesture.latestX - gesture.startX
+  const deltaY = gesture.latestY - gesture.startY
+  if (Math.abs(deltaY) > 24 && Math.abs(deltaY) > Math.abs(deltaX) * 1.15) {
+    gesture.active = false
+  }
+}
+
+function endSwipeGesture(event: PointerEvent) {
+  const gesture = swipeGesture.value
+  if (!gesture.active || gesture.pointerId !== event.pointerId) return
+
+  const deltaX = gesture.latestX - gesture.startX
+  const deltaY = gesture.latestY - gesture.startY
+  gesture.active = false
+
+  if (Math.abs(deltaX) < 72 || Math.abs(deltaX) < Math.abs(deltaY) * 1.45) return
+
+  if (deltaX > 0) {
+    handleSwipeRight()
+  } else {
+    handleSwipeLeft()
+  }
+}
+
+function cancelSwipeGesture(event: PointerEvent) {
+  const gesture = swipeGesture.value
+  if (gesture.pointerId === event.pointerId) {
+    gesture.active = false
+  }
+}
+
+function handleSwipeRight() {
+  if (configOpen.value) {
+    closeSettings()
+    return
+  }
+
+  if (!sidebarOpen.value) {
+    sidebarOpen.value = true
+  }
+}
+
+function handleSwipeLeft() {
+  if (sidebarOpen.value) {
+    sidebarOpen.value = false
+    return
+  }
+
+  if (!configOpen.value) {
+    configOpen.value = true
+  }
+}
 </script>
 
 <template>
-  <main class="app-shell">
+  <main
+    class="app-shell"
+    @pointerdown="beginSwipeGesture"
+    @pointermove="updateSwipeGesture"
+    @pointerup="endSwipeGesture"
+    @pointercancel="cancelSwipeGesture"
+  >
     <button
       v-if="sidebarOpen"
       class="sidebar-backdrop"

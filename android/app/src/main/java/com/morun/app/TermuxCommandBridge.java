@@ -39,7 +39,9 @@ public class TermuxCommandBridge {
     private static final String TERMUX_RUN_COMMAND_SERVICE = "com.termux.app.RunCommandService";
     private static final String TERMUX_BIN_DIR = "/data/data/com.termux/files/usr/bin/";
     private static final String TERMUX_HOME_PREFIX = "/data/data/com.termux/files/home/";
-    private static final int TERMUX_IMPORT_CHUNK_SIZE = 700000;
+    private static final int TERMUX_IMPORT_CHUNK_SIZE = 48 * 1024;
+    private static final String TERMUX_MEDIA_CHUNK_BEGIN = "__MORUN_MEDIA_CHUNK_BEGIN__";
+    private static final String TERMUX_MEDIA_CHUNK_END = "__MORUN_MEDIA_CHUNK_END__";
     private static final String TERMUX_RESULT_ACTION = "com.morun.app.TERMUX_COMMAND_RESULT";
     private static final String EXTRA_COMMAND_PATH = "com.termux.RUN_COMMAND_PATH";
     private static final String EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS";
@@ -231,7 +233,7 @@ public class TermuxCommandBridge {
             "mkdir -p \"$d\";",
             "size=$(wc -c < " + quotedSource + " | tr -d ' ');",
             "if [ \"$size\" -gt " + maxBytes + " ]; then echo \"SIZE:$size\"; exit 23; fi;",
-            "base64 -w 0 " + quotedSource + " | split -b " + TERMUX_IMPORT_CHUNK_SIZE + " -d -a 4 - \"$d/chunk_\";",
+            "base64 " + quotedSource + " | tr -d '\\r\\n' | split -b " + TERMUX_IMPORT_CHUNK_SIZE + " -d -a 4 - \"$d/chunk_\";",
             "count=$(ls \"$d\"/chunk_* 2>/dev/null | wc -l | tr -d ' ');",
             "echo \"SIZE:$size\";",
             "echo \"COUNT:$count\";"
@@ -247,22 +249,32 @@ public class TermuxCommandBridge {
             }
 
             int count = parsePreparedChunkCount(prepare.stdout);
-            if (count <= 0 || count > 64) {
+            int maxExpectedChunks = (int) Math.ceil(((double) maxBytes * 4.0 / 3.0) / TERMUX_IMPORT_CHUNK_SIZE) + 2;
+            if (count <= 0 || count > maxExpectedChunks) {
                 throw new IllegalStateException("Invalid Termux media chunk count.");
             }
 
             StringBuilder base64 = new StringBuilder();
             for (int index = 0; index < count; index += 1) {
                 String chunkName = String.format(Locale.ROOT, "%04d", index);
-                String chunkScript = "cat " + shellQuote(exportDir + "/chunk_" + chunkName);
+                String chunkScript = String.join(
+                    " ",
+                    "printf '%s\\n' " + shellQuote(TERMUX_MEDIA_CHUNK_BEGIN) + ";",
+                    "cat " + shellQuote(exportDir + "/chunk_" + chunkName) + ";",
+                    "printf '\\n%s\\n' " + shellQuote(TERMUX_MEDIA_CHUNK_END) + ";"
+                );
                 TermuxCommandResultData chunk = runInternalCommandSync(TERMUX_BIN_DIR + "sh", new String[] { "-c", chunkScript }, 60000);
                 if (!chunk.succeeded()) {
                     throw new IllegalStateException(firstNonEmpty(chunk.stderr, chunk.errmsg, "Failed to read Termux media chunk."));
                 }
-                base64.append(chunk.stdout.trim());
+                base64.append(extractBase64Chunk(chunk.stdout));
             }
 
-            return base64.toString();
+            String encoded = base64.toString();
+            if (encoded.length() == 0 || encoded.length() % 4 != 0) {
+                throw new IllegalStateException("Invalid base64 data returned from Termux.");
+            }
+            return encoded;
         } finally {
             String cleanupScript = "rm -rf " + shellQuote(exportDir);
             runInternalCommandSync(TERMUX_BIN_DIR + "sh", new String[] { "-c", cleanupScript }, 10000);
@@ -538,6 +550,21 @@ public class TermuxCommandBridge {
             }
         }
         return -1;
+    }
+
+    private String extractBase64Chunk(String stdout) {
+        String value = stdout == null ? "" : stdout;
+        int begin = value.indexOf(TERMUX_MEDIA_CHUNK_BEGIN);
+        int end = value.indexOf(TERMUX_MEDIA_CHUNK_END);
+        if (begin < 0 || end <= begin) {
+            throw new IllegalStateException("Missing Termux media chunk markers.");
+        }
+
+        String payload = value.substring(begin + TERMUX_MEDIA_CHUNK_BEGIN.length(), end).replaceAll("\\s+", "");
+        if (!payload.matches("[A-Za-z0-9+/=]*")) {
+            throw new IllegalStateException("Invalid base64 data returned from Termux.");
+        }
+        return payload;
     }
 
     private boolean isSafeTermuxHomePath(String path) {

@@ -388,7 +388,7 @@ async function sendMessage() {
   }
 
   const userMessage = createUserMessage(content)
-  const assistantMessage = createAssistantMessage()
+  let assistantMessage = createAssistantMessage()
   assistantMessage.createdAt = userMessage.createdAt + 1
 
   if (session.title === '新会话' || session.title === 'New chat') {
@@ -424,7 +424,7 @@ async function sendMessage() {
       },
       requestToolConfirmation,
       onEvent: (event) => {
-        handleAgentEvent(session, assistantMessage, event)
+        assistantMessage = handleAgentEvent(session, assistantMessage, event)
       },
     })
 
@@ -510,28 +510,28 @@ async function generateSessionTitle(
   }
 }
 
-function handleAgentEvent(session: ChatSession, assistantMessage: ChatMessage, event: AgentRunEvent) {
+function handleAgentEvent(session: ChatSession, assistantMessage: ChatMessage, event: AgentRunEvent): ChatMessage {
   if (
     event.type === 'run_started' ||
     event.type === 'run_completed' ||
     event.type === 'run_aborted' ||
     event.type === 'fallback_without_tools'
   ) {
-    return
+    return assistantMessage
   }
 
   if (event.type === 'assistant_delta') {
     appendOrStreamAssistantMessage(session, assistantMessage, event.accumulatedContent)
-    return
+    return assistantMessage
   }
 
   if (event.type === 'assistant_message') {
     appendOrCompleteAssistantMessage(session, assistantMessage, event.content)
-    return
+    return assistantMessage
   }
 
   if (event.type === 'tool_started') {
-    removeAssistantPlaceholder(session, assistantMessage.id)
+    const nextAssistantMessage = commitAssistantPlaceholderBeforeTool(session, assistantMessage)
     session.messages.push({
       id: createId('message'),
       role: 'tool',
@@ -545,15 +545,16 @@ function handleAgentEvent(session: ChatSession, assistantMessage: ChatMessage, e
     })
     session.updatedAt = Date.now()
     scheduleScroll()
-    return
+    return nextAssistantMessage
   }
 
   if (event.type === 'tool_confirmation_required') {
     updateToolConfirmationMessage(session, event.toolCall.id)
-    return
+    return assistantMessage
   }
 
   updateToolMessage(session, event)
+  return assistantMessage
 }
 
 function requestToolConfirmation(toolCall: ToolCall, tool: ToolDefinition) {
@@ -651,11 +652,21 @@ function updateToolConfirmationMessage(session: ChatSession, toolCallId: string)
   scheduleScroll()
 }
 
-function removeAssistantPlaceholder(session: ChatSession, assistantMessageId: string) {
-  const placeholder = session.messages.find((message) => message.id === assistantMessageId)
-  if (!placeholder) return
+function commitAssistantPlaceholderBeforeTool(session: ChatSession, assistantMessage: ChatMessage): ChatMessage {
+  const placeholder = session.messages.find((message) => message.id === assistantMessage.id)
+  if (!placeholder) return createAssistantMessage()
 
-  session.messages = session.messages.filter((message) => message.id !== assistantMessageId)
+  const content = placeholder.content.trim()
+  if (!content) {
+    session.messages = session.messages.filter((message) => message.id !== assistantMessage.id)
+    return createAssistantMessage()
+  }
+
+  placeholder.content = content
+  placeholder.status = 'complete'
+  queueMediaImportsFromMessage(session, placeholder)
+
+  return createAssistantMessage()
 }
 
 function queueMediaImportsForSession(session: ChatSession | null | undefined) {

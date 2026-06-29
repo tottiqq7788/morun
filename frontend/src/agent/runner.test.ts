@@ -205,6 +205,49 @@ describe('runAgentTurn', () => {
     expect(result.messages.filter((message) => message.role === 'tool')).toHaveLength(2)
   })
 
+  it('emits assistant text before starting a tool call', async () => {
+    const events: AgentRunEvent[] = []
+    let calls = 0
+    const client: ChatCompletionClient = async () => {
+      calls += 1
+      if (calls === 1) {
+        return {
+          content: 'I will use the camera.',
+          toolCalls: [
+            {
+              id: 'call_1',
+              name: 'echo',
+              rawArguments: '{"text":"photo"}',
+              arguments: { text: 'photo' },
+            },
+          ],
+        }
+      }
+      return {
+        content: 'done',
+        toolCalls: [],
+      }
+    }
+
+    await runAgentTurn({
+      messages: [{ role: 'user', content: 'take a photo' }],
+      modelConfig,
+      tools: [echoTool],
+      client,
+      onEvent: (event) => events.push(event),
+    })
+
+    expect(events.map((event) => event.type)).toEqual([
+      'run_started',
+      'assistant_message',
+      'tool_started',
+      'tool_completed',
+      'assistant_message',
+      'run_completed',
+    ])
+    expect(events.find((event) => event.type === 'assistant_message')?.content).toBe('I will use the camera.')
+  })
+
   it('records tool failures and lets the model recover', async () => {
     const events: AgentRunEvent[] = []
     let calls = 0
@@ -271,6 +314,29 @@ describe('runAgentTurn', () => {
 
     expect(result.content).toContain('工具调用次数达到上限')
     expect(result.messages.filter((message) => message.role === 'tool')).toHaveLength(1)
+  })
+
+  it('allows ten tool rounds by default', async () => {
+    const client: ChatCompletionClient = async () => ({
+      content: '',
+      toolCalls: [
+        {
+          id: 'call_loop',
+          name: 'echo',
+          rawArguments: '{"text":"loop"}',
+          arguments: { text: 'loop' },
+        },
+      ],
+    })
+
+    const result = await runAgentTurn({
+      messages: [{ role: 'user', content: 'loop' }],
+      modelConfig,
+      tools: [echoTool],
+      client,
+    })
+
+    expect(result.messages.filter((message) => message.role === 'tool')).toHaveLength(10)
   })
 
   it('falls back without tools when the provider rejects tool calling', async () => {

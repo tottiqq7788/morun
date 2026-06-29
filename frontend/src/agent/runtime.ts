@@ -37,7 +37,7 @@ export const emptyAssistantReplyMessage = '模型没有返回内容。'
 export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAgentTurnResult> {
   const runId = createRunId()
   const client = options.client ?? requestChatCompletion
-  const maxToolRounds = options.maxToolRounds ?? 4
+  const maxToolRounds = options.maxToolRounds ?? 10
   const toolsByName = new Map(options.tools.map((tool) => [tool.name, tool]))
   const initialMessages = [...options.messages]
   let history = [...initialMessages]
@@ -117,6 +117,13 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
 
       usedTools = true
       completedToolRounds += 1
+      const toolPreamble = completion.content.trim()
+      if (toolPreamble) {
+        options.onEvent?.({
+          type: 'assistant_message',
+          content: toolPreamble,
+        })
+      }
       history.push({
         role: 'assistant',
         content: completion.content,

@@ -275,7 +275,11 @@ public class MorunNativePlugin extends Plugin {
         String path = sourceToPath(source);
         if (path.startsWith(TERMUX_HOME_PREFIX)) {
             String base64 = getTermuxCommandBridge().readHomeFileAsBase64(path, MAX_IMAGE_MEDIA_BYTES);
-            return new MediaBytes(Base64.decode(base64, Base64.DEFAULT), declaredMimeTypeFromPath(path));
+            try {
+                return new MediaBytes(Base64.decode(base64, Base64.NO_WRAP), declaredMimeTypeFromPath(path));
+            } catch (IllegalArgumentException error) {
+                throw new IllegalArgumentException("Invalid image data returned from Termux.");
+            }
         }
 
         if (isMorunReadablePath(path)) {

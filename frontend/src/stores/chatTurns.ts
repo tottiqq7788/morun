@@ -7,6 +7,12 @@ export interface ChatTurnPage {
   startedAt: number
 }
 
+export interface ChatTurnRollback {
+  draft: string
+  messages: ChatMessage[]
+  remainingTurnCount: number
+}
+
 export function groupChatTurnPages(messages: ChatMessage[]): ChatTurnPage[] {
   const pages: ChatTurnPage[] = []
   let current: ChatTurnPage | null = null
@@ -37,4 +43,18 @@ export function groupChatTurnPages(messages: ChatMessage[]): ChatTurnPage[] {
   }
 
   return pages
+}
+
+export function rollbackChatTurnToDraft(messages: ChatMessage[], userMessageId: string): ChatTurnRollback | null {
+  const targetIndex = messages.findIndex((message) => message.role === 'user' && message.id === userMessageId)
+  if (targetIndex < 0) return null
+
+  const target = messages[targetIndex]
+  const nextMessages = messages.slice(0, targetIndex)
+
+  return {
+    draft: target.content,
+    messages: nextMessages,
+    remainingTurnCount: groupChatTurnPages(nextMessages).filter((page) => page.userMessage).length,
+  }
 }

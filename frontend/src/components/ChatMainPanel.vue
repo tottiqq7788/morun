@@ -12,6 +12,7 @@ import {
   Send,
   Settings,
   Square,
+  Undo2,
   X,
 } from '@lucide/vue'
 import {
@@ -63,6 +64,7 @@ const emit = defineEmits<{
   openSettings: []
   sendMessage: []
   stopGeneration: []
+  'rollback-turn': [payload: { userMessageId: string; content: string }]
   'update:draft': [value: string]
   'update:activeModelValue': [value: string]
 }>()
@@ -84,6 +86,7 @@ const currentPageIndex = computed(() => Math.min(pageIndex.value, lastPageIndex.
 const currentPage = computed(() => turnPages.value[currentPageIndex.value] ?? null)
 const currentAgentMessages = computed(() => currentPage.value?.messages ?? [])
 const pageLabel = computed(() => (turnPages.value.length ? `${currentPageIndex.value + 1} / ${turnPages.value.length}` : '0 / 0'))
+const canRollbackCurrentTurn = computed(() => Boolean(currentPage.value?.userMessage && currentPageIndex.value < lastPageIndex.value))
 const sessionMediaAttachments = computed(() => {
   return props.activeSession?.messages.flatMap((message) => message.mediaAttachments ?? []) ?? []
 })
@@ -191,6 +194,18 @@ function handleSendMessage() {
 function openQuestionDialog(message: ChatMessage | null | undefined) {
   if (!message) return
   questionDialogMessage.value = message
+}
+
+function handleRollbackTurn() {
+  const userMessage = currentPage.value?.userMessage
+  if (!userMessage || !canRollbackCurrentTurn.value || props.isGenerating) return
+
+  followLatest.value = true
+  shouldStickToBottom.value = true
+  emit('rollback-turn', {
+    userMessageId: userMessage.id,
+    content: userMessage.content,
+  })
 }
 
 function openToolDialog(message: ChatMessage) {
@@ -347,6 +362,17 @@ defineExpose({
     </header>
 
     <div v-if="currentPage?.userMessage" class="question-pin">
+      <button
+        v-if="canRollbackCurrentTurn"
+        class="question-rollback-button"
+        type="button"
+        aria-label="回退到当前对话"
+        title="回退到当前对话"
+        :disabled="isGenerating"
+        @click.stop="handleRollbackTurn"
+      >
+        <Undo2 :size="16" />
+      </button>
       <button class="question-bubble pinned-question" type="button" @click="openQuestionDialog(currentPage.userMessage)">
         {{ currentPage.userMessage.content }}
       </button>

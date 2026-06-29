@@ -56,6 +56,7 @@ import {
   withStoredModelAccountApiKey,
 } from './stores/modelSecrets'
 import { renderMarkdown } from './stores/markdown'
+import { rollbackChatTurnToDraft } from './stores/chatTurns'
 import {
   buildSessionTitleMessages,
   countConversationTurns,
@@ -84,6 +85,11 @@ interface PendingToolConfirmation {
   toolCall: ToolCall
   tool: ToolDefinition
   resolve: (decision: ToolConfirmationDecision) => void
+}
+
+interface PendingTitleRequest {
+  turnCount: number
+  token: number
 }
 
 interface SwipeGestureState {
@@ -124,7 +130,8 @@ const isTestingConnection = ref(false)
 const activeAbortController = ref<AbortController | null>(null)
 const pendingToolConfirmation = ref<PendingToolConfirmation | null>(null)
 const chatPanel = ref<InstanceType<typeof ChatMainPanel> | null>(null)
-const pendingTitleTurnCounts = new Map<string, number>()
+const pendingTitleRequests = new Map<string, PendingTitleRequest>()
+let titleRequestToken = 0
 const pendingMediaImports = new Set<string>()
 const mediaImportStates = ref<Record<string, { status: 'pending' | 'error'; error?: string }>>({})
 const swipeGesture = ref<SwipeGestureState>({
@@ -193,6 +200,25 @@ function selectSession(id: string) {
 
 function sessionConversationCount(session: ChatSession) {
   return countConversationTurns(session.messages)
+}
+
+function rollbackTurnToDraft(payload: { userMessageId: string; content: string }) {
+  if (isGenerating.value) return
+
+  const session = activeSession.value
+  if (!session) return
+
+  const rollback = rollbackChatTurnToDraft(session.messages, payload.userMessageId)
+  if (!rollback) return
+
+  session.messages = rollback.messages
+  session.titleGeneratedTurnCounts = (session.titleGeneratedTurnCounts ?? []).filter(
+    (turnCount) => turnCount <= rollback.remainingTurnCount,
+  )
+  session.updatedAt = Date.now()
+  pendingTitleRequests.delete(session.id)
+  draft.value = rollback.draft
+  scheduleScroll()
 }
 
 function deleteSession(id: string) {
@@ -459,11 +485,12 @@ function queueSessionTitleGeneration(session: ChatSession, titleModelConfig: Age
   if (!shouldGenerateSessionTitle(session)) return
 
   const turnCount = countConversationTurns(session.messages)
-  if (pendingTitleTurnCounts.get(session.id) === turnCount) return
+  if (pendingTitleRequests.get(session.id)?.turnCount === turnCount) return
 
-  pendingTitleTurnCounts.set(session.id, turnCount)
+  const token = ++titleRequestToken
+  pendingTitleRequests.set(session.id, { turnCount, token })
 
-  void generateSessionTitle(session, titleModelConfig, turnCount)
+  void generateSessionTitle(session, titleModelConfig, turnCount, token)
 }
 
 function createTitleModelConfig(baseUrl: string, apiKey: string, model: string): AgentModelConfig {
@@ -481,6 +508,7 @@ async function generateSessionTitle(
   session: ChatSession,
   titleModelConfig: AgentModelConfig,
   requestedTurnCount: number,
+  requestToken: number,
 ) {
   try {
     const result = await chatCompletionClient({
@@ -490,9 +518,11 @@ async function generateSessionTitle(
       useTools: false,
     })
     const title = sanitizeGeneratedSessionTitle(result.content)
+    const pendingRequest = pendingTitleRequests.get(session.id)
     if (
       !title ||
-      pendingTitleTurnCounts.get(session.id) !== requestedTurnCount ||
+      pendingRequest?.turnCount !== requestedTurnCount ||
+      pendingRequest.token !== requestToken ||
       countConversationTurns(session.messages) !== requestedTurnCount
     ) {
       return
@@ -504,8 +534,9 @@ async function generateSessionTitle(
   } catch (error) {
     console.warn('生成会话标题失败', error)
   } finally {
-    if (pendingTitleTurnCounts.get(session.id) === requestedTurnCount) {
-      pendingTitleTurnCounts.delete(session.id)
+    const pendingRequest = pendingTitleRequests.get(session.id)
+    if (pendingRequest?.turnCount === requestedTurnCount && pendingRequest.token === requestToken) {
+      pendingTitleRequests.delete(session.id)
     }
   }
 }
@@ -1136,6 +1167,7 @@ function handleSwipeLeft() {
       @open-settings="configOpen = true"
       @send-message="sendMessage"
       @stop-generation="stopGeneration"
+      @rollback-turn="rollbackTurnToDraft"
     />
 
     <ToolConfirmationDialog

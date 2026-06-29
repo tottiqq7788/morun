@@ -91,6 +91,42 @@ describe('runAgentTurn', () => {
     expect(result.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'hello' })
   })
 
+  it('rejects an empty assistant reply when no tool calls are present', async () => {
+    const events: AgentRunEvent[] = []
+    const client: ChatCompletionClient = async () => ({
+      content: '',
+      toolCalls: [],
+    })
+
+    await expect(
+      runAgentTurn({
+        messages: [{ role: 'user', content: 'hi' }],
+        modelConfig,
+        tools: [echoTool],
+        client,
+        onEvent: (event) => events.push(event),
+      }),
+    ).rejects.toThrow('模型没有返回内容。')
+
+    expect(events.map((event) => event.type)).toEqual(['run_started'])
+  })
+
+  it('rejects a whitespace-only assistant reply when no tool calls are present', async () => {
+    const client: ChatCompletionClient = async () => ({
+      content: '   \n\t',
+      toolCalls: [],
+    })
+
+    await expect(
+      runAgentTurn({
+        messages: [{ role: 'user', content: 'hi' }],
+        modelConfig,
+        tools: [echoTool],
+        client,
+      }),
+    ).rejects.toThrow('模型没有返回内容。')
+  })
+
   it('executes one tool call and continues to the final reply', async () => {
     const events: AgentRunEvent[] = []
     let calls = 0

@@ -75,9 +75,81 @@ describe('chat store persistence', () => {
       id: 'message_1',
       role: 'assistant',
       content: '',
-      status: 'complete',
+      status: 'error',
+      error: '模型没有返回内容。',
     })
     expect(typeof sessions[1].messages[0].createdAt).toBe('number')
+  })
+
+  it('normalizes stored empty assistant replies as errors without changing other messages', () => {
+    const storage = createMemoryStorage({
+      [sessionsKey]: JSON.stringify([
+        {
+          id: 'session_1',
+          title: 'Empty assistant',
+          createdAt: 1,
+          updatedAt: 2,
+          messages: [
+            {
+              id: 'message_user',
+              role: 'user',
+              content: 'hello',
+              createdAt: 3,
+              status: 'complete',
+            },
+            {
+              id: 'message_empty_assistant',
+              role: 'assistant',
+              content: '   ',
+              createdAt: 4,
+              status: 'streaming',
+            },
+            {
+              id: 'message_normal_assistant',
+              role: 'assistant',
+              content: 'world',
+              createdAt: 5,
+              status: 'complete',
+            },
+            {
+              id: 'message_tool',
+              role: 'tool',
+              content: '',
+              createdAt: 6,
+              status: 'complete',
+            },
+          ],
+        },
+      ]),
+    })
+
+    const [session] = loadSessions(storage)
+
+    expect(session.messages[0]).toMatchObject({
+      id: 'message_user',
+      role: 'user',
+      content: 'hello',
+      status: 'complete',
+    })
+    expect(session.messages[1]).toMatchObject({
+      id: 'message_empty_assistant',
+      role: 'assistant',
+      content: '   ',
+      status: 'error',
+      error: '模型没有返回内容。',
+    })
+    expect(session.messages[2]).toMatchObject({
+      id: 'message_normal_assistant',
+      role: 'assistant',
+      content: 'world',
+      status: 'complete',
+    })
+    expect(session.messages[3]).toMatchObject({
+      id: 'message_tool',
+      role: 'tool',
+      content: '',
+      status: 'complete',
+    })
   })
 
   it('settles interrupted in-flight messages when loading persisted sessions', () => {

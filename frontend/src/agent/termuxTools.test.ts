@@ -31,6 +31,19 @@ describe('termux tool catalog', () => {
     })
   })
 
+  it('keeps phone data queries small by default and allows slower Termux providers', () => {
+    expect(termuxCommandForTool('termux_messages', { action: 'sms_list' })).toMatchObject({
+      command: 'termux-sms-list',
+      args: ['-l', '5'],
+      timeoutMs: 60000,
+    })
+    expect(termuxCommandForTool('termux_call_log', { action: 'list' })).toMatchObject({
+      command: 'termux-call-log',
+      args: ['-l', '5'],
+      timeoutMs: 60000,
+    })
+  })
+
   it('marks high-risk phone data tools as confirm-only and disables contacts/messages/call log by default', () => {
     const tools = createTermuxTools(createBridge())
     expect(tools.find((tool) => tool.name === 'termux_location')).toMatchObject({

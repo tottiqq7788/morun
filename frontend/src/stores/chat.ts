@@ -70,6 +70,7 @@ export const olderConfigKey = 'family-agent.model-config.v1'
 const validRoles = new Set<Role>(['user', 'assistant', 'tool'])
 const validMessageStatuses = new Set<MessageStatus>(['complete', 'streaming', 'error'])
 const validToolStatuses = new Set<ToolStatus>(['running', 'done', 'error'])
+const emptyAssistantReplyMessage = '模型没有返回内容。'
 
 export const providerPresets: ProviderPreset[] = [
   {
@@ -432,6 +433,14 @@ function normalizeMessages(value: unknown): ChatMessage[] {
       if (typeof raw.toolError === 'string') message.toolError = raw.toolError
       else if (wasRunningTool) message.toolError = '工具执行已中断。'
       if (wasRunningTool && !message.content) message.content = message.toolError ?? '工具执行已中断。'
+      if (
+        message.role === 'assistant' &&
+        !message.content.trim() &&
+        typeof raw.error !== 'string'
+      ) {
+        message.status = 'error'
+        message.error = emptyAssistantReplyMessage
+      }
 
       return message
     })

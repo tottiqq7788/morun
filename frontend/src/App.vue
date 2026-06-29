@@ -928,51 +928,53 @@ function adjustComposerHeight() {
           </button>
         </header>
 
-        <section class="settings-section">
-          <div class="section-heading">
-            <h3>模型配置</h3>
-            <button class="secondary-button compact" type="button" @click="openAccountDialog">
-              <Plus :size="15" />
-              添加
-            </button>
-          </div>
+        <div class="settings-scroll-area">
+          <section class="settings-section">
+            <div class="section-heading">
+              <h3>系统提示词</h3>
+            </div>
 
-          <div v-if="modelConfig.accounts.length" class="model-account-list">
-            <button
-              v-for="account in modelConfig.accounts"
-              :key="account.id"
-              :class="['model-account-card', { selected: account.id === activeModelAccount?.id }]"
-              type="button"
-              :aria-pressed="account.id === activeModelAccount?.id"
-              @click="modelConfig.activeAccountId = account.id"
-            >
-              <span>
-                <strong>{{ accountDisplayName(account) }}</strong>
-                <small>{{ account.model || '未选择模型' }}</small>
-              </span>
-              <small>{{ accountTestLabel(account) }}</small>
-            </button>
-          </div>
-          <p v-else class="empty-copy">还没有模型配置。添加后可以在对话顶部切换厂商和模型。</p>
-        </section>
+            <label>
+              <textarea v-model="modelConfig.systemPrompt" rows="5" />
+            </label>
+          </section>
 
-        <TermuxEnvironmentCard />
+          <section class="settings-section">
+            <div class="section-heading">
+              <h3>模型配置</h3>
+              <button class="secondary-button compact" type="button" @click="openAccountDialog">
+                <Plus :size="15" />
+                添加
+              </button>
+            </div>
 
-        <section class="settings-section">
-          <div class="section-heading">
-            <h3>系统提示词</h3>
-          </div>
+            <div v-if="modelConfig.accounts.length" class="model-account-list">
+              <button
+                v-for="account in modelConfig.accounts"
+                :key="account.id"
+                :class="['model-account-card', { selected: account.id === activeModelAccount?.id }]"
+                type="button"
+                :aria-pressed="account.id === activeModelAccount?.id"
+                @click="modelConfig.activeAccountId = account.id"
+              >
+                <span>
+                  <strong>{{ accountDisplayName(account) }}</strong>
+                  <small>{{ account.model || '未选择模型' }}</small>
+                </span>
+                <small>{{ accountTestLabel(account) }}</small>
+              </button>
+            </div>
+            <p v-else class="empty-copy">还没有模型配置。添加后可以在对话顶部切换厂商和模型。</p>
+          </section>
 
-          <label>
-            <textarea v-model="modelConfig.systemPrompt" rows="5" />
-          </label>
-        </section>
+          <TermuxEnvironmentCard />
 
-        <ToolCatalogSection
-          :tools="catalogTools"
-          :get-title="toolRegistry.getTitle"
-          @update-policy="handleToolPolicyUpdate"
-        />
+          <ToolCatalogSection
+            :tools="catalogTools"
+            :get-title="toolRegistry.getTitle"
+            @update-policy="handleToolPolicyUpdate"
+          />
+        </div>
 
         <footer class="settings-footer">
           <button class="danger-button compact-danger" type="button" :disabled="!activeSession" @click="deleteActiveSessionFromSettings">
@@ -1023,7 +1025,17 @@ function adjustComposerHeight() {
 
             <label>
               {{ draftProvider.apiKeyLabel }}
-              <input v-model="accountDraft.apiKey" autocomplete="off" type="password" placeholder="请输入接口密钥" />
+              <input
+                v-model="accountDraft.apiKey"
+                autocomplete="off"
+                autocapitalize="none"
+                autocorrect="off"
+                class="secret-text-input"
+                inputmode="text"
+                spellcheck="false"
+                type="text"
+                placeholder="请输入接口密钥"
+              />
             </label>
 
             <div :class="['status-line', connectionStatus.state]">

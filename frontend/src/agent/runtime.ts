@@ -32,6 +32,8 @@ export interface RunAgentTurnResult {
   fellBackWithoutTools: boolean
 }
 
+export const emptyAssistantReplyMessage = '模型没有返回内容。'
+
 export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAgentTurnResult> {
   const runId = createRunId()
   const client = options.client ?? requestChatCompletion
@@ -85,6 +87,10 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
 
       if (!completion.toolCalls.length || !useTools) {
         const content = completion.content.trim()
+        if (!content) {
+          throw new Error(emptyAssistantReplyMessage)
+        }
+
         history.push({
           role: 'assistant',
           content,

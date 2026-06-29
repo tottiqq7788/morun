@@ -4,6 +4,8 @@ import type { JsonSchema, ToolDefinition, ToolExecutionResult } from './types'
 type TermuxCommandSpec = Omit<TermuxCommandRequest, 'requestId'>
 
 const defaultTimeoutMs = 20000
+const phoneDataDefaultLimit = 5
+const phoneDataTimeoutMs = 60000
 const termuxHomePrefix = '/data/data/com.termux/files/home/'
 
 const deviceStatusActions = ['battery_status', 'audio_info', 'camera_info'] as const
@@ -291,13 +293,13 @@ export function termuxCommandForTool(toolName: TermuxToolName, args: unknown): T
 
   if (toolName === 'termux_messages') {
     parseEnum(record.action, messageActions, 'action')
-    const limit = String(parseInteger(record.limit ?? 10, 'limit', 1, 50))
-    return { command: 'termux-sms-list', args: ['-l', limit], timeoutMs: 20000 }
+    const limit = String(parseInteger(record.limit ?? phoneDataDefaultLimit, 'limit', 1, 50))
+    return { command: 'termux-sms-list', args: ['-l', limit], timeoutMs: phoneDataTimeoutMs }
   }
 
   parseEnum(record.action, callLogActions, 'action')
-  const limit = String(parseInteger(record.limit ?? 10, 'limit', 1, 50))
-  return { command: 'termux-call-log', args: ['-l', limit], timeoutMs: 20000 }
+  const limit = String(parseInteger(record.limit ?? phoneDataDefaultLimit, 'limit', 1, 50))
+  return { command: 'termux-call-log', args: ['-l', limit], timeoutMs: phoneDataTimeoutMs }
 }
 
 async function executeTermuxTool(

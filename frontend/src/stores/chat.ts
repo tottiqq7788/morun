@@ -26,6 +26,7 @@ export interface ChatSession {
   title: string
   createdAt: number
   updatedAt: number
+  titleGeneratedTurnCounts?: number[]
   messages: ChatMessage[]
 }
 
@@ -373,6 +374,14 @@ export function normalizeModels(value: unknown) {
   return Array.from(new Set(value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)))
 }
 
+function normalizeTitleGeneratedTurnCounts(value: unknown) {
+  if (!Array.isArray(value)) return []
+
+  return Array.from(
+    new Set(value.filter((item): item is number => Number.isInteger(item) && item > 0)),
+  ).sort((a, b) => a - b)
+}
+
 export function normalizeSessions(value: unknown): ChatSession[] {
   if (!Array.isArray(value)) return []
 
@@ -390,6 +399,7 @@ export function normalizeSessions(value: unknown): ChatSession[] {
         title: title === 'New chat' ? '新会话' : title.slice(0, 80),
         createdAt,
         updatedAt: asFiniteNumber(raw.updatedAt) ?? createdAt,
+        titleGeneratedTurnCounts: normalizeTitleGeneratedTurnCounts(raw.titleGeneratedTurnCounts),
         messages: normalizeMessages(raw.messages),
       }
     })
@@ -568,6 +578,7 @@ export function createSessionModel(): ChatSession {
     title: '新会话',
     createdAt: now,
     updatedAt: now,
+    titleGeneratedTurnCounts: [],
     messages: [],
   }
 }

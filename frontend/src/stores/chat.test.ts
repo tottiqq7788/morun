@@ -37,6 +37,7 @@ describe('chat store persistence', () => {
           title: 'New chat',
           createdAt: 1,
           updatedAt: 2,
+          titleGeneratedTurnCounts: [15, 'bad', 5, 5, -1],
         },
         {
           id: 'session_with_bad_messages',
@@ -67,6 +68,7 @@ describe('chat store persistence', () => {
     expect(sessions[0]).toMatchObject({
       id: 'session_without_messages',
       title: '新会话',
+      titleGeneratedTurnCounts: [5, 15],
       messages: [],
     })
     expect(sessions[1].title).toBe('新会话')

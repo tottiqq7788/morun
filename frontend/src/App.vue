@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   MessageSquare,
   Plus,
@@ -17,6 +17,7 @@ import { runAgentTurn, type ToolConfirmationDecision } from './agent/runtime'
 import { createToolRegistry } from './agent/toolRegistry'
 import { loadToolPolicy, saveToolPolicy } from './agent/toolPolicy'
 import type {
+  AgentModelConfig,
   AgentRunEvent,
   ToolCall,
   ToolConfirmationPolicy,
@@ -45,6 +46,13 @@ import {
   resolveModelAccountApiKey,
   withStoredModelAccountApiKey,
 } from './stores/modelSecrets'
+import {
+  buildSessionTitleMessages,
+  countConversationTurns,
+  markSessionTitleGenerated,
+  sanitizeGeneratedSessionTitle,
+  shouldGenerateSessionTitle,
+} from './stores/sessionTitle'
 
 type ConnectionState = 'idle' | 'testing' | 'success' | 'error'
 
@@ -106,6 +114,7 @@ const isTestingConnection = ref(false)
 const activeAbortController = ref<AbortController | null>(null)
 const pendingToolConfirmation = ref<PendingToolConfirmation | null>(null)
 const chatPanel = ref<InstanceType<typeof ChatMainPanel> | null>(null)
+const pendingTitleTurnCounts = new Map<string, number>()
 const swipeGesture = ref<SwipeGestureState>({
   active: false,
   pointerId: null,
@@ -133,6 +142,22 @@ onMounted(async () => {
   }
 })
 
+watch(
+  () => [
+    activeSession.value?.id ?? '',
+    activeSession.value?.messages.length ?? 0,
+    activeModelAccount.value?.id ?? '',
+    selectedProvider.value?.id ?? '',
+    isGenerating.value,
+  ],
+  () => {
+    if (isGenerating.value) return
+
+    void maybeQueueActiveSessionTitleGeneration()
+  },
+  { flush: 'post', immediate: true },
+)
+
 function createSession() {
   chatStore.createSession()
   draft.value = ''
@@ -144,6 +169,10 @@ function selectSession(id: string) {
   chatStore.selectSession(id)
   sidebarOpen.value = false
   scheduleScroll()
+}
+
+function sessionConversationCount(session: ChatSession) {
+  return countConversationTurns(session.messages)
 }
 
 function deleteSession(id: string) {
@@ -199,6 +228,26 @@ function createAccountDraft(providerId = defaultConfigProviderId()): AccountDraf
 
 function defaultConfigProviderId() {
   return activeModelAccount.value?.providerId ?? 'deepseek'
+}
+
+async function maybeQueueActiveSessionTitleGeneration() {
+  const session = activeSession.value
+  const account = activeModelAccount.value
+  const provider = selectedProvider.value
+  if (!session || !account || !provider || !provider.baseUrl.trim() || !account.model.trim()) return
+  if (!shouldGenerateSessionTitle(session)) return
+
+  try {
+    const apiKey = await resolveModelAccountApiKey(account, nativeBridge)
+    if (provider.requiresApiKey && !apiKey.trim()) {
+      console.warn('跳过会话标题生成：当前预览环境无法读取模型接口密钥。')
+      return
+    }
+
+    queueSessionTitleGeneration(session, createTitleModelConfig(provider.baseUrl, apiKey, account.model))
+  } catch (error) {
+    console.warn('准备生成会话标题失败', error)
+  }
 }
 
 function updateDraftProvider() {
@@ -362,6 +411,8 @@ async function sendMessage() {
     if (hasMessage(session, assistantMessage.id)) {
       assistantMessage.status = 'complete'
     }
+
+    queueSessionTitleGeneration(session, createTitleModelConfig(provider.baseUrl, apiKey, account.model))
   } catch (error) {
     const target = hasMessage(session, assistantMessage.id) ? assistantMessage : createAssistantMessage()
     if (!hasMessage(session, target.id)) {
@@ -381,6 +432,61 @@ async function sendMessage() {
     activeAbortController.value = null
     pendingToolConfirmation.value = null
     scheduleScroll()
+  }
+}
+
+function queueSessionTitleGeneration(session: ChatSession, titleModelConfig: AgentModelConfig) {
+  if (!shouldGenerateSessionTitle(session)) return
+
+  const turnCount = countConversationTurns(session.messages)
+  if (pendingTitleTurnCounts.get(session.id) === turnCount) return
+
+  pendingTitleTurnCounts.set(session.id, turnCount)
+
+  void generateSessionTitle(session, titleModelConfig, turnCount)
+}
+
+function createTitleModelConfig(baseUrl: string, apiKey: string, model: string): AgentModelConfig {
+  return {
+    baseUrl,
+    apiKey,
+    model,
+    temperature: 0.2,
+    maxTokens: 256,
+    stream: false,
+  }
+}
+
+async function generateSessionTitle(
+  session: ChatSession,
+  titleModelConfig: AgentModelConfig,
+  requestedTurnCount: number,
+) {
+  try {
+    const result = await chatCompletionClient({
+      messages: buildSessionTitleMessages(session),
+      modelConfig: titleModelConfig,
+      tools: [],
+      useTools: false,
+    })
+    const title = sanitizeGeneratedSessionTitle(result.content)
+    if (
+      !title ||
+      pendingTitleTurnCounts.get(session.id) !== requestedTurnCount ||
+      countConversationTurns(session.messages) !== requestedTurnCount
+    ) {
+      return
+    }
+
+    session.title = title
+    markSessionTitleGenerated(session, requestedTurnCount)
+    session.updatedAt = Date.now()
+  } catch (error) {
+    console.warn('生成会话标题失败', error)
+  } finally {
+    if (pendingTitleTurnCounts.get(session.id) === requestedTurnCount) {
+      pendingTitleTurnCounts.delete(session.id)
+    }
   }
 }
 
@@ -1004,7 +1110,7 @@ function handleSwipeLeft() {
           <MessageSquare :size="17" />
           <span>
             <strong>{{ session.title }}</strong>
-            <small>{{ session.messages.length }} 条消息</small>
+            <small>{{ sessionConversationCount(session) }} 条对话</small>
           </span>
         </button>
       </nav>

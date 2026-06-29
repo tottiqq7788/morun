@@ -191,8 +191,9 @@ export function useChatStore(storage: StorageLike = localStorage) {
 
   const activeModelInitial = computed(() => {
     const account = activeModelAccount.value
-    const label = account?.model || account?.name || ''
-    return label.trim().charAt(0).toUpperCase() || '?'
+    if (!account) return '?'
+
+    return account.model || '未选择模型'
   })
 
   const activeModelValue = computed({

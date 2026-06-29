@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CheckCircle2,
   CircleAlert,
+  Check,
   LoaderCircle,
   Menu,
   MessageSquare,
@@ -54,11 +55,11 @@ const emit = defineEmits<{
 const agentScroll = ref<HTMLElement | null>(null)
 const messagesEnd = ref<HTMLElement | null>(null)
 const composerTextarea = ref<HTMLTextAreaElement | null>(null)
-const modelSelect = ref<HTMLSelectElement | null>(null)
 const pageIndex = ref(0)
 const followLatest = ref(true)
 const shouldStickToBottom = ref(true)
 const questionDialogMessage = ref<ChatMessage | null>(null)
+const modelPickerOpen = ref(false)
 
 const turnPages = computed(() => groupChatTurnPages(props.activeSession?.messages ?? []))
 const lastPageIndex = computed(() => Math.max(turnPages.value.length - 1, 0))
@@ -100,17 +101,24 @@ function adjustComposerHeight() {
     const textarea = composerTextarea.value
     if (!textarea) return
 
+    const style = window.getComputedStyle(textarea)
+    const lineHeight = Number.parseFloat(style.lineHeight) || 20
+    const paddingY = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom)
+    const borderY = Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.borderBottomWidth)
+    const minHeight = lineHeight + paddingY + borderY
+    const maxHeight = lineHeight * 4 + paddingY + borderY
+
     textarea.style.height = 'auto'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`
+    const nextHeight = Math.min(maxHeight, Math.max(minHeight, textarea.scrollHeight + borderY))
+    textarea.style.height = `${nextHeight}px`
+    textarea.style.overflowY = nextHeight >= maxHeight ? 'auto' : 'hidden'
   })
 }
 
-function openModelSelect() {
-  const select = modelSelect.value
-  if (!select || !props.modelAccounts.length) return
+function openModelPicker() {
+  if (!props.modelAccounts.length) return
 
-  select.focus()
-  select.showPicker?.()
+  modelPickerOpen.value = true
 }
 
 function handleDraftInput(event: Event) {
@@ -119,9 +127,9 @@ function handleDraftInput(event: Event) {
   adjustComposerHeight()
 }
 
-function handleModelChange(event: Event) {
-  const target = event.target as HTMLSelectElement | null
-  emit('update:activeModelValue', target?.value ?? '')
+function selectModel(accountId: string, model: string) {
+  emit('update:activeModelValue', makeModelValue(accountId, model))
+  modelPickerOpen.value = false
 }
 
 function handleAgentScroll() {
@@ -203,6 +211,14 @@ watch(
   messageSignature,
   () => {
     scrollToEnd()
+  },
+  { flush: 'post' },
+)
+
+watch(
+  () => props.draft,
+  () => {
+    adjustComposerHeight()
   },
   { flush: 'post' },
 )
@@ -303,98 +319,119 @@ defineExpose({
 
     <footer class="composer">
       <div class="composer-main">
-        <div class="composer-input">
-          <textarea
-            ref="composerTextarea"
-            :value="draft"
-            rows="1"
-            placeholder="输入消息..."
-            :disabled="isGenerating"
-            @input="handleDraftInput"
-            @keydown.enter.exact.prevent="handleSendMessage"
-          />
-        </div>
-
-        <div class="turn-pager" aria-label="当前会话轮次分页">
-          <button
-            class="pager-button"
-            type="button"
-            aria-label="上一轮对话"
-            :disabled="!turnPages.length || currentPageIndex <= 0"
-            @click="goPrevPage"
-          >
-            <ChevronLeft :size="15" />
-          </button>
-          <span class="pager-label">{{ pageLabel }}</span>
-          <button
-            class="pager-button"
-            type="button"
-            aria-label="下一轮对话"
-            :disabled="!turnPages.length || currentPageIndex >= lastPageIndex"
-            @click="goNextPage"
-          >
-            <ChevronRight :size="15" />
-          </button>
-        </div>
-      </div>
-
-      <div class="composer-side-actions">
-        <select
-          ref="modelSelect"
-          :value="activeModelValue"
-          class="model-switcher-hidden"
-          aria-label="选择模型"
-          :disabled="!modelAccounts.length"
-          @change="handleModelChange"
-        >
-          <option v-if="!modelAccounts.length" value="" disabled>未配置模型</option>
-          <optgroup
-            v-for="account in modelAccounts"
-            :key="account.id"
-            :label="accountDisplayName(account)"
-          >
-            <option
-              v-for="model in accountModels(account)"
-              :key="makeModelValue(account.id, model)"
-              :value="makeModelValue(account.id, model)"
+        <div class="composer-toolbar">
+          <div class="model-switcher-wrap">
+            <button
+              class="model-text-button"
+              type="button"
+              aria-label="选择模型"
+              title="选择模型"
+              :disabled="!modelAccounts.length"
+              @click="openModelPicker"
             >
-              {{ model }}
-            </option>
-          </optgroup>
-        </select>
-        <button
-          class="secondary-button composer-square-button model-square-button"
-          type="button"
-          aria-label="选择模型"
-          title="选择模型"
-          :disabled="!modelAccounts.length"
-          @click="openModelSelect"
-        >
-          {{ activeModelInitial }}
-        </button>
-        <button
-          v-if="isGenerating"
-          class="primary-button composer-square-button stop"
-          type="button"
-          aria-label="停止"
-          title="停止"
-          @click="emit('stopGeneration')"
-        >
-          <Square :size="16" />
-        </button>
-        <button
-          v-else
-          class="primary-button composer-square-button"
-          type="button"
-          aria-label="发送"
-          title="发送"
-          :disabled="!draft.trim()"
-          @click="handleSendMessage"
-        >
-          <Send :size="16" />
-        </button>
+              {{ activeModelInitial }}
+            </button>
+          </div>
+
+          <div class="turn-pager" aria-label="当前会话轮次分页">
+            <button
+              class="pager-button"
+              type="button"
+              aria-label="上一轮对话"
+              :disabled="!turnPages.length || currentPageIndex <= 0"
+              @click="goPrevPage"
+            >
+              <ChevronLeft :size="15" />
+            </button>
+            <span class="pager-label">{{ pageLabel }}</span>
+            <button
+              class="pager-button"
+              type="button"
+              aria-label="下一轮对话"
+              :disabled="!turnPages.length || currentPageIndex >= lastPageIndex"
+              @click="goNextPage"
+            >
+              <ChevronRight :size="15" />
+            </button>
+          </div>
+        </div>
+
+        <div class="composer-input-row">
+          <div class="composer-input">
+            <textarea
+              ref="composerTextarea"
+              :value="draft"
+              rows="1"
+              placeholder="输入消息..."
+              :disabled="isGenerating"
+              @input="handleDraftInput"
+              @keydown.enter.exact.prevent="handleSendMessage"
+            />
+          </div>
+
+          <button
+            v-if="isGenerating"
+            class="primary-button composer-square-button stop"
+            type="button"
+            aria-label="停止"
+            title="停止"
+            @click="emit('stopGeneration')"
+          >
+            <Square :size="16" />
+          </button>
+          <button
+            v-else
+            class="primary-button composer-square-button"
+            type="button"
+            aria-label="发送"
+            title="发送"
+            :disabled="!draft.trim()"
+            @click="handleSendMessage"
+          >
+            <Send :size="16" />
+          </button>
+        </div>
       </div>
     </footer>
+
+    <section v-if="modelPickerOpen" class="model-picker-layer" aria-label="选择模型" @click.self="modelPickerOpen = false">
+      <div class="model-picker-dialog">
+        <header>
+          <div>
+            <p class="eyebrow">模型</p>
+            <h2>选择模型</h2>
+          </div>
+          <button class="icon-button" type="button" aria-label="关闭模型选择" title="关闭模型选择" @click="modelPickerOpen = false">
+            <X :size="18" />
+          </button>
+        </header>
+
+        <div class="model-picker-content">
+          <section
+            v-for="account in modelAccounts"
+            :key="account.id"
+            class="model-picker-group"
+          >
+            <div class="model-picker-group-title">
+              <strong>{{ accountDisplayName(account) }}</strong>
+              <span>{{ accountModels(account).length }} 个模型</span>
+            </div>
+            <div class="model-option-list">
+              <button
+                v-for="model in accountModels(account)"
+                :key="makeModelValue(account.id, model)"
+                :class="['model-option-button', { selected: activeModelValue === makeModelValue(account.id, model) }]"
+                type="button"
+                @click="selectModel(account.id, model)"
+              >
+                <span>{{ model }}</span>
+                <Check v-if="activeModelValue === makeModelValue(account.id, model)" :size="17" />
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
 
     <section v-if="questionDialogMessage" class="question-dialog-layer" aria-label="完整提问" @click.self="questionDialogMessage = null">
       <div class="question-dialog">

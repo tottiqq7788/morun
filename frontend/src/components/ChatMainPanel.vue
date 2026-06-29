@@ -75,6 +75,7 @@ const shouldStickToBottom = ref(true)
 const questionDialogMessage = ref<ChatMessage | null>(null)
 const modelPickerOpen = ref(false)
 const mediaPreview = ref<MediaAttachment | null>(null)
+const toolDialogMessage = ref<ChatMessage | null>(null)
 
 const turnPages = computed(() => groupChatTurnPages(props.activeSession?.messages ?? []))
 const lastPageIndex = computed(() => Math.max(turnPages.value.length - 1, 0))
@@ -191,6 +192,10 @@ function openQuestionDialog(message: ChatMessage | null | undefined) {
   questionDialogMessage.value = message
 }
 
+function openToolDialog(message: ChatMessage) {
+  toolDialogMessage.value = message
+}
+
 function assistantDisplayContent(message: ChatMessage) {
   if (message.content.trim()) return message.content
   if (message.status === 'streaming') return '正在连接模型...'
@@ -266,6 +271,7 @@ watch(
     shouldStickToBottom.value = true
     modelPickerOpen.value = false
     questionDialogMessage.value = null
+    toolDialogMessage.value = null
     pageIndex.value = lastPageIndex.value
     scrollToEnd()
   },
@@ -361,7 +367,12 @@ defineExpose({
           :key="message.id"
           :class="['message-row', message.role]"
         >
-          <div v-if="message.role === 'tool'" :class="['tool-card', message.toolStatus]">
+          <button
+            v-if="message.role === 'tool'"
+            :class="['tool-card', message.toolStatus]"
+            type="button"
+            @click="openToolDialog(message)"
+          >
             <div class="tool-card-header">
               <span :class="['tool-state-icon', message.toolStatus]">
                 <LoaderCircle v-if="message.toolStatus === 'running'" :size="16" />
@@ -370,33 +381,10 @@ defineExpose({
               </span>
               <span class="tool-title">
                 <strong>{{ toolDisplayTitle(message) }}</strong>
-                <small>{{ toolSubtitle(message) }}</small>
               </span>
               <span class="tool-status">{{ toolStatusSummary(message) }}</span>
             </div>
-            <details v-if="hasToolDetails(message)" class="tool-details" :open="message.toolStatus === 'error'">
-              <summary>调用详情</summary>
-              <div v-if="formatToolArgs(message)" class="tool-detail-block">
-                <span>参数</span>
-                <pre>{{ formatToolArgs(message) }}</pre>
-              </div>
-              <div v-if="formatToolOutput(message)" class="tool-detail-block">
-                <span>{{ message.toolStatus === 'error' ? '错误' : '结果' }}</span>
-                <pre>{{ formatToolOutput(message) }}</pre>
-              </div>
-            </details>
-            <div v-if="message.mediaAttachments?.length" class="message-media-grid">
-              <button
-                v-for="attachment in message.mediaAttachments"
-                :key="attachment.mediaId"
-                class="message-media-thumb"
-                type="button"
-                @click="openMediaPreview(attachment)"
-              >
-                <img :src="mediaAttachmentViewSrc(attachment)" :alt="attachment.fileName" loading="lazy">
-              </button>
-            </div>
-          </div>
+          </button>
           <div v-else class="message-bubble">
             <div
               class="markdown-body"
@@ -541,6 +529,69 @@ defineExpose({
         </header>
         <div class="question-dialog-content">
           {{ questionDialogMessage.content }}
+        </div>
+      </div>
+    </section>
+    <section v-if="toolDialogMessage" class="tool-dialog-layer" aria-label="工具调用详情" @click.self="toolDialogMessage = null">
+      <div class="tool-dialog">
+        <header>
+          <div class="tool-dialog-title">
+            <span :class="['tool-state-icon', toolDialogMessage.toolStatus]">
+              <LoaderCircle v-if="toolDialogMessage.toolStatus === 'running'" :size="17" />
+              <CircleAlert v-else-if="toolDialogMessage.toolStatus === 'error'" :size="17" />
+              <CheckCircle2 v-else :size="17" />
+            </span>
+            <div>
+              <p class="eyebrow">工具调用</p>
+              <h2>{{ toolDisplayTitle(toolDialogMessage) }}</h2>
+            </div>
+          </div>
+          <button class="icon-button" type="button" aria-label="关闭工具详情" title="关闭工具详情" @click="toolDialogMessage = null">
+            <X :size="18" />
+          </button>
+        </header>
+
+        <div class="tool-dialog-content">
+          <div class="tool-dialog-status">
+            <span>{{ toolStatusSummary(toolDialogMessage) }}</span>
+          </div>
+
+          <div v-if="toolSubtitle(toolDialogMessage)" class="tool-detail-block">
+            <span>命令详情</span>
+            <pre>{{ toolSubtitle(toolDialogMessage) }}</pre>
+          </div>
+
+          <div v-if="formatToolArgs(toolDialogMessage)" class="tool-detail-block">
+            <span>参数</span>
+            <pre>{{ formatToolArgs(toolDialogMessage) }}</pre>
+          </div>
+
+          <div v-if="formatToolOutput(toolDialogMessage)" class="tool-detail-block">
+            <span>{{ toolDialogMessage.toolStatus === 'error' ? '错误' : '结果' }}</span>
+            <pre>{{ formatToolOutput(toolDialogMessage) }}</pre>
+          </div>
+
+          <section v-if="toolDialogMessage.mediaAttachments?.length" class="tool-dialog-media">
+            <span>涉及图片</span>
+            <div class="message-media-grid">
+              <button
+                v-for="attachment in toolDialogMessage.mediaAttachments"
+                :key="attachment.mediaId"
+                class="message-media-thumb"
+                type="button"
+                @click="openMediaPreview(attachment)"
+              >
+                <img :src="mediaAttachmentViewSrc(attachment)" :alt="attachment.fileName" loading="lazy">
+              </button>
+            </div>
+          </section>
+
+          <p
+            v-if="!toolSubtitle(toolDialogMessage) && !hasToolDetails(toolDialogMessage) && !toolDialogMessage.mediaAttachments?.length"
+            class="tool-dialog-empty"
+          >
+            暂无更多详情
+          </p>
         </div>
       </div>
     </section>

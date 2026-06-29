@@ -56,6 +56,22 @@ export interface TermuxCommandResult {
   errmsg?: string
 }
 
+export interface ImportMediaRequest {
+  source: string
+  kind: 'image'
+}
+
+export interface ImportMediaResult {
+  mediaId: string
+  kind: 'image'
+  originalSource: string
+  localPath: string
+  mimeType: string
+  fileName: string
+  size: number
+  createdAt: number
+}
+
 export interface MorunNativePlugin {
   isAvailable(): Promise<NativeAvailability>
   secureGet(options: { key: string }): Promise<{ value: string | null }>
@@ -68,6 +84,7 @@ export interface MorunNativePlugin {
   openTermuxApiInstallPage(): Promise<{ ok: true }>
   openTermuxApp(): Promise<{ ok: true }>
   runTermuxCommand(options: TermuxCommandRequest): Promise<TermuxCommandResult>
+  importMedia(options: ImportMediaRequest): Promise<ImportMediaResult>
   startChatCompletion(options: NativeChatCompletionRequest): Promise<{ requestId: string }>
   cancelChatCompletion(options: { requestId: string }): Promise<{ ok: true }>
   addListener(
@@ -97,6 +114,7 @@ export interface MorunNativeBridge {
   openTermuxApiInstallPage(): Promise<boolean>
   openTermuxApp(): Promise<boolean>
   runTermuxCommand(options: TermuxCommandRequest): Promise<TermuxCommandResult>
+  importMedia(options: ImportMediaRequest): Promise<ImportMediaResult>
   startChatCompletion(options: NativeChatCompletionRequest): Promise<{ requestId: string }>
   cancelChatCompletion(requestId: string): Promise<boolean>
   addListener: MorunNativePlugin['addListener']
@@ -229,6 +247,13 @@ export function createMorunNativeBridge(
       } catch (error) {
         return unavailableTermuxCommandResult(options.requestId, error instanceof Error ? error.message : undefined)
       }
+    },
+    async importMedia(options) {
+      if (!(await platformInfo())) {
+        throw new Error('Native bridge unavailable.')
+      }
+
+      return plugin.importMedia(options)
     },
     async startChatCompletion(options) {
       if (!(await platformInfo())) {

@@ -242,6 +242,16 @@ function createBridge({
       exitCode: available ? 0 : null,
       timedOut: false,
     }),
+    importMedia: async () => ({
+      mediaId: 'media_test123',
+      kind: 'image',
+      originalSource: 'https://example.com/photo.jpg',
+      localPath: '/data/user/0/com.morun.app/files/morun-media/media_test123.jpg',
+      mimeType: 'image/jpeg',
+      fileName: 'media_test123.jpg',
+      size: 100,
+      createdAt: 1,
+    }),
     startChatCompletion: startChatCompletion ?? (async ({ requestId }) => ({ requestId })),
     cancelChatCompletion: cancelChatCompletion ?? (async () => available),
     addListener: async (eventName, listener) => {

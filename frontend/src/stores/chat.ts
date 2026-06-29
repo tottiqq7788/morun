@@ -1,5 +1,6 @@
 import { computed, ref, watch } from 'vue'
 import type { AgentMessage, StorageLike } from '../agent/types'
+import { normalizeMediaAttachments, type MediaAttachment } from './media'
 
 export type Role = 'user' | 'assistant' | 'tool'
 export type MessageStatus = 'complete' | 'streaming' | 'error'
@@ -19,6 +20,7 @@ export interface ChatMessage {
   toolStatus?: ToolStatus
   toolDuration?: number
   toolError?: string
+  mediaAttachments?: MediaAttachment[]
 }
 
 export interface ChatSession {
@@ -441,6 +443,8 @@ function normalizeMessages(value: unknown): ChatMessage[] {
       if ('toolResult' in raw) message.toolResult = raw.toolResult
       if (rawToolStatus) message.toolStatus = wasRunningTool ? 'error' : rawToolStatus
       if (asFiniteNumber(raw.toolDuration) !== undefined) message.toolDuration = asFiniteNumber(raw.toolDuration)
+      const mediaAttachments = normalizeMediaAttachments(raw.mediaAttachments)
+      if (mediaAttachments.length) message.mediaAttachments = mediaAttachments
       if (typeof raw.toolError === 'string') message.toolError = raw.toolError
       else if (wasRunningTool) message.toolError = '工具执行已中断。'
       if (wasRunningTool && !message.content) message.content = message.toolError ?? '工具执行已中断。'

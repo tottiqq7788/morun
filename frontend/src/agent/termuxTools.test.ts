@@ -44,6 +44,19 @@ describe('termux tool catalog', () => {
     })
   })
 
+  it('adds a media hint for camera photos', () => {
+    expect(termuxCommandForTool('termux_media_capture', {
+      action: 'camera_photo',
+      outputPath: '/data/data/com.termux/files/home/selfie.jpg',
+    })).toMatchObject({
+      command: 'termux-camera-photo',
+      mediaHint: {
+        kind: 'image',
+        source: '/data/data/com.termux/files/home/selfie.jpg',
+      },
+    })
+  })
+
   it('marks high-risk phone data tools as confirm-only and disables contacts/messages/call log by default', () => {
     const tools = createTermuxTools(createBridge())
     expect(tools.find((tool) => tool.name === 'termux_location')).toMatchObject({
@@ -139,6 +152,16 @@ function createBridge(overrides: Partial<MorunNativeBridge> = {}): MorunNativeBr
       stderr: '',
       exitCode: 0,
       timedOut: false,
+    }),
+    importMedia: async () => ({
+      mediaId: 'media_test123',
+      kind: 'image',
+      originalSource: 'https://example.com/photo.jpg',
+      localPath: '/data/user/0/com.morun.app/files/morun-media/media_test123.jpg',
+      mimeType: 'image/jpeg',
+      fileName: 'media_test123.jpg',
+      size: 100,
+      createdAt: 1,
     }),
     startChatCompletion: async ({ requestId }) => ({ requestId }),
     cancelChatCompletion: async () => true,

@@ -42,6 +42,15 @@ import {
   type ModelAccount,
 } from './stores/chat'
 import {
+  extractMarkdownImageReferences,
+  findMediaAttachmentBySource,
+  isImportableImageSource,
+  mediaIdFromUrl,
+  normalizeMediaAttachments,
+  normalizeMediaSource,
+  type MediaAttachment,
+} from './stores/media'
+import {
   migrateModelAccountSecrets,
   resolveModelAccountApiKey,
   withStoredModelAccountApiKey,
@@ -116,6 +125,8 @@ const activeAbortController = ref<AbortController | null>(null)
 const pendingToolConfirmation = ref<PendingToolConfirmation | null>(null)
 const chatPanel = ref<InstanceType<typeof ChatMainPanel> | null>(null)
 const pendingTitleTurnCounts = new Map<string, number>()
+const pendingMediaImports = new Set<string>()
+const mediaImportStates = ref<Record<string, { status: 'pending' | 'error'; error?: string }>>({})
 const swipeGesture = ref<SwipeGestureState>({
   active: false,
   pointerId: null,
@@ -155,6 +166,14 @@ watch(
     if (isGenerating.value) return
 
     void maybeQueueActiveSessionTitleGeneration()
+  },
+  { flush: 'post', immediate: true },
+)
+
+watch(
+  () => activeSession.value?.id,
+  () => {
+    queueMediaImportsForSession(activeSession.value)
   },
   { flush: 'post', immediate: true },
 )
@@ -560,10 +579,12 @@ function appendOrStreamAssistantMessage(session: ChatSession, assistantMessage: 
   if (existing) {
     existing.content = content
     existing.status = 'streaming'
+    queueMediaImportsFromMessage(session, existing)
   } else {
     assistantMessage.content = content
     assistantMessage.status = 'streaming'
     session.messages.push(assistantMessage)
+    queueMediaImportsFromMessage(session, assistantMessage)
   }
 
   session.updatedAt = Date.now()
@@ -575,14 +596,17 @@ function appendOrCompleteAssistantMessage(session: ChatSession, assistantMessage
   if (existing) {
     existing.content = content
     existing.status = 'complete'
+    queueMediaImportsFromMessage(session, existing)
   } else {
-    session.messages.push({
+    const message: ChatMessage = {
       id: createId('message'),
       role: 'assistant',
       content,
       createdAt: Date.now(),
       status: 'complete',
-    })
+    }
+    session.messages.push(message)
+    queueMediaImportsFromMessage(session, message)
   }
 
   session.updatedAt = Date.now()
@@ -602,6 +626,10 @@ function updateToolMessage(session: ChatSession, event: Extract<AgentRunEvent, {
   if (event.type === 'tool_completed') {
     message.content = event.output.text
     message.toolResult = event.output.data ?? event.output.text
+    for (const attachment of normalizeMediaAttachments([event.output.data])) {
+      attachMediaToMessage(message, attachment)
+    }
+    queueMediaImportsFromMessage(session, message)
   } else {
     message.content = event.error
     message.toolError = event.error
@@ -628,6 +656,100 @@ function removeAssistantPlaceholder(session: ChatSession, assistantMessageId: st
   if (!placeholder) return
 
   session.messages = session.messages.filter((message) => message.id !== assistantMessageId)
+}
+
+function queueMediaImportsForSession(session: ChatSession | null | undefined) {
+  if (!session) return
+  for (const message of session.messages) {
+    queueMediaImportsFromMessage(session, message)
+  }
+}
+
+function queueMediaImportsFromMessage(session: ChatSession, message: ChatMessage) {
+  const sources = [
+    ...extractMarkdownImageReferences(message.content).map((reference) => reference.source),
+    ...extractMediaHintSources(message.toolResult),
+  ]
+
+  for (const source of sources) {
+    queueMediaImport(session, message, source)
+  }
+}
+
+function queueMediaImport(session: ChatSession, message: ChatMessage, source: string) {
+  const normalizedSource = normalizeMediaSource(source)
+  if (!normalizedSource || mediaIdFromUrl(normalizedSource) || !isImportableImageSource(normalizedSource)) return
+  if (/^https:\/\//i.test(normalizedSource) || /^data:image\//i.test(normalizedSource)) return
+
+  const existingAttachment = findMediaAttachmentBySource(collectSessionMediaAttachments(session), normalizedSource)
+  if (existingAttachment) {
+    attachMediaToMessage(message, existingAttachment)
+    return
+  }
+
+  const importKey = mediaImportKey(normalizedSource)
+  if (pendingMediaImports.has(importKey)) return
+
+  pendingMediaImports.add(importKey)
+  setMediaImportState(normalizedSource, { status: 'pending' })
+
+  void nativeBridge
+    .importMedia({ source: normalizedSource, kind: 'image' })
+    .then((attachment) => {
+      attachMediaToMessage(message, attachment)
+      clearMediaImportState(normalizedSource)
+      session.updatedAt = Date.now()
+      scheduleScroll()
+    })
+    .catch((error) => {
+      setMediaImportState(normalizedSource, {
+        status: 'error',
+        error: formatRequestError(error),
+      })
+    })
+    .finally(() => {
+      pendingMediaImports.delete(importKey)
+    })
+}
+
+function collectSessionMediaAttachments(session: ChatSession | null | undefined): MediaAttachment[] {
+  return session?.messages.flatMap((message) => message.mediaAttachments ?? []) ?? []
+}
+
+function attachMediaToMessage(message: ChatMessage, attachment: MediaAttachment) {
+  const existing = message.mediaAttachments ?? []
+  if (existing.some((item) => item.mediaId === attachment.mediaId)) return
+
+  message.mediaAttachments = [...existing, attachment]
+}
+
+function extractMediaHintSources(value: unknown): string[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+  const record = value as Record<string, unknown>
+  const hint = record.mediaHint
+  if (!hint || typeof hint !== 'object' || Array.isArray(hint)) return []
+  const rawHint = hint as Record<string, unknown>
+  return rawHint.kind === 'image' && typeof rawHint.source === 'string' ? [rawHint.source] : []
+}
+
+function mediaImportKey(source: string) {
+  return normalizeMediaSource(source)
+}
+
+function setMediaImportState(source: string, state: { status: 'pending' | 'error'; error?: string }) {
+  mediaImportStates.value = {
+    ...mediaImportStates.value,
+    [mediaImportKey(source)]: state,
+  }
+}
+
+function clearMediaImportState(source: string) {
+  const key = mediaImportKey(source)
+  if (!(key in mediaImportStates.value)) return
+
+  const next = { ...mediaImportStates.value }
+  delete next[key]
+  mediaImportStates.value = next
 }
 
 function hasMessage(session: ChatSession, messageId: string) {
@@ -980,6 +1102,7 @@ function handleSwipeLeft() {
       :is-generating="isGenerating"
       :format-time="formatTime"
       :render-markdown="renderMarkdown"
+      :media-import-states="mediaImportStates"
       :tool-display-title="toolDisplayTitle"
       :tool-subtitle="toolSubtitle"
       :tool-status-summary="toolStatusSummary"

@@ -17,6 +17,7 @@ export interface ToolRegistryContext extends Pick<ToolExecutionContext, 'storage
 }
 
 const toolTitles: Record<string, string> = {
+  morun_media_import: '导入媒体',
   calculate: '安全计算',
   clear_notes: '清空记忆',
   get_current_time: '读取当前时间',

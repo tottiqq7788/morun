@@ -154,6 +154,59 @@ describe('chat store persistence', () => {
     })
   })
 
+  it('normalizes stored media attachments', () => {
+    const storage = createMemoryStorage({
+      [sessionsKey]: JSON.stringify([
+        {
+          id: 'session_media',
+          title: 'Media',
+          createdAt: 1,
+          updatedAt: 2,
+          messages: [
+            {
+              id: 'message_media',
+              role: 'assistant',
+              content: '![photo](morun-media://media_test123)',
+              createdAt: 3,
+              status: 'complete',
+              mediaAttachments: [
+                {
+                  mediaId: 'media_test123',
+                  kind: 'image',
+                  originalSource: 'https://example.com/photo.jpg',
+                  localPath: '/data/user/0/com.morun.app/files/morun-media/media_test123.jpg',
+                  mimeType: 'image/jpeg',
+                  fileName: 'media_test123.jpg',
+                  size: 100,
+                  createdAt: 4,
+                },
+                {
+                  mediaId: 'bad',
+                  kind: 'image',
+                  originalSource: 'bad',
+                  localPath: '/tmp/bad.svg',
+                  mimeType: 'image/svg+xml',
+                  fileName: 'bad.svg',
+                  size: 100,
+                  createdAt: 4,
+                },
+              ],
+            },
+          ],
+        },
+      ]),
+    })
+
+    const [session] = loadSessions(storage)
+
+    expect(session.messages[0].mediaAttachments).toHaveLength(1)
+    expect(session.messages[0].mediaAttachments?.[0]).toMatchObject({
+      mediaId: 'media_test123',
+      kind: 'image',
+      mimeType: 'image/jpeg',
+    })
+  })
+
   it('settles interrupted in-flight messages when loading persisted sessions', () => {
     const storage = createMemoryStorage({
       [sessionsKey]: JSON.stringify([

@@ -19,7 +19,11 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -34,6 +38,8 @@ public class TermuxCommandBridge {
     private static final String TERMUX_RUN_COMMAND_ACTION = "com.termux.RUN_COMMAND";
     private static final String TERMUX_RUN_COMMAND_SERVICE = "com.termux.app.RunCommandService";
     private static final String TERMUX_BIN_DIR = "/data/data/com.termux/files/usr/bin/";
+    private static final String TERMUX_HOME_PREFIX = "/data/data/com.termux/files/home/";
+    private static final int TERMUX_IMPORT_CHUNK_SIZE = 700000;
     private static final String TERMUX_RESULT_ACTION = "com.morun.app.TERMUX_COMMAND_RESULT";
     private static final String EXTRA_COMMAND_PATH = "com.termux.RUN_COMMAND_PATH";
     private static final String EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS";
@@ -180,7 +186,7 @@ public class TermuxCommandBridge {
         pending.timeoutRunnable = () -> {
             PendingTermuxCommand removed = activeCommands.remove(requestId);
             if (removed != null) {
-                resolveResult(removed.call, requestId, true, "", "", null, true, null, "Termux command timed out.");
+                completePending(removed, new TermuxCommandResultData(requestId, true, "", "", null, true, null, "Termux command timed out."));
             }
         };
         activeCommands.put(requestId, pending);
@@ -200,6 +206,66 @@ public class TermuxCommandBridge {
             activeCommands.remove(requestId);
             mainHandler.removeCallbacks(pending.timeoutRunnable);
             resolveUnavailable(call, requestId, error.getMessage() == null ? "Failed to start Termux command." : error.getMessage());
+        }
+    }
+
+    public String readHomeFileAsBase64(String sourcePath, int maxBytes) throws Exception {
+        if (!isSafeTermuxHomePath(sourcePath)) {
+            throw new IllegalArgumentException("Only Termux home image paths are allowed.");
+        }
+        if (!isTermuxInstalled()) {
+            throw new IllegalStateException("Termux is not installed.");
+        }
+        if (!hasRunCommandPermission()) {
+            throw new IllegalStateException("RUN_COMMAND permission is not granted.");
+        }
+
+        String exportId = "morun_" + UUID.randomUUID().toString().replace("-", "");
+        String exportDir = TERMUX_HOME_PREFIX + ".morun-media-export/" + exportId;
+        String quotedSource = shellQuote(sourcePath);
+        String prepareScript = String.join(
+            " ",
+            "set -e;",
+            "d=" + shellQuote(exportDir) + ";",
+            "rm -rf \"$d\";",
+            "mkdir -p \"$d\";",
+            "size=$(wc -c < " + quotedSource + " | tr -d ' ');",
+            "if [ \"$size\" -gt " + maxBytes + " ]; then echo \"SIZE:$size\"; exit 23; fi;",
+            "base64 -w 0 " + quotedSource + " | split -b " + TERMUX_IMPORT_CHUNK_SIZE + " -d -a 4 - \"$d/chunk_\";",
+            "count=$(ls \"$d\"/chunk_* 2>/dev/null | wc -l | tr -d ' ');",
+            "echo \"SIZE:$size\";",
+            "echo \"COUNT:$count\";"
+        );
+
+        try {
+            TermuxCommandResultData prepare = runInternalCommandSync(TERMUX_BIN_DIR + "sh", new String[] { "-c", prepareScript }, 120000);
+            if (prepare.exitCode != null && prepare.exitCode == 23) {
+                throw new IllegalArgumentException("Image is too large.");
+            }
+            if (!prepare.succeeded()) {
+                throw new IllegalStateException(firstNonEmpty(prepare.stderr, prepare.errmsg, "Failed to prepare Termux media import."));
+            }
+
+            int count = parsePreparedChunkCount(prepare.stdout);
+            if (count <= 0 || count > 64) {
+                throw new IllegalStateException("Invalid Termux media chunk count.");
+            }
+
+            StringBuilder base64 = new StringBuilder();
+            for (int index = 0; index < count; index += 1) {
+                String chunkName = String.format(Locale.ROOT, "%04d", index);
+                String chunkScript = "cat " + shellQuote(exportDir + "/chunk_" + chunkName);
+                TermuxCommandResultData chunk = runInternalCommandSync(TERMUX_BIN_DIR + "sh", new String[] { "-c", chunkScript }, 60000);
+                if (!chunk.succeeded()) {
+                    throw new IllegalStateException(firstNonEmpty(chunk.stderr, chunk.errmsg, "Failed to read Termux media chunk."));
+                }
+                base64.append(chunk.stdout.trim());
+            }
+
+            return base64.toString();
+        } finally {
+            String cleanupScript = "rm -rf " + shellQuote(exportDir);
+            runInternalCommandSync(TERMUX_BIN_DIR + "sh", new String[] { "-c", cleanupScript }, 10000);
         }
     }
 
@@ -309,7 +375,99 @@ public class TermuxCommandBridge {
         Integer errCode = bundle != null && bundle.containsKey(EXTRA_PLUGIN_RESULT_ERR) ? bundle.getInt(EXTRA_PLUGIN_RESULT_ERR) : null;
         String errmsg = bundle == null ? null : bundle.getString(EXTRA_PLUGIN_RESULT_ERRMSG, null);
 
-        resolveResult(pending.call, requestId, true, stdout, stderr, exitCode, false, errCode, errmsg);
+        completePending(pending, new TermuxCommandResultData(requestId, true, stdout, stderr, exitCode, false, errCode, errmsg));
+    }
+
+    private TermuxCommandResultData runInternalCommandSync(String commandPath, String[] args, int timeoutMs) {
+        String requestId = "internal_" + UUID.randomUUID().toString();
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<TermuxCommandResultData> resultRef = new AtomicReference<>();
+
+        PendingTermuxCommand pending = new PendingTermuxCommand(requestId, result -> {
+            resultRef.set(result);
+            latch.countDown();
+        });
+        pending.timeoutRunnable = () -> {
+            PendingTermuxCommand removed = activeCommands.remove(requestId);
+            if (removed != null) {
+                completePending(removed, new TermuxCommandResultData(requestId, true, "", "", null, true, null, "Termux command timed out."));
+            }
+        };
+
+        ensureResultReceiverRegistered();
+        activeCommands.put(requestId, pending);
+        mainHandler.postDelayed(pending.timeoutRunnable, timeoutMs);
+
+        Intent resultIntent = new Intent(TERMUX_RESULT_ACTION);
+        resultIntent.setPackage(context.getPackageName());
+        resultIntent.putExtra("requestId", requestId);
+
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            flags |= PendingIntent.FLAG_MUTABLE;
+        }
+        PendingIntent pendingIntent = PendingIntent.getBroadcast(
+            context,
+            requestId.hashCode() & 0x7fffffff,
+            resultIntent,
+            flags
+        );
+
+        Intent intent = new Intent(TERMUX_RUN_COMMAND_ACTION);
+        intent.setClassName(TERMUX_PACKAGE_NAME, TERMUX_RUN_COMMAND_SERVICE);
+        intent.putExtra(EXTRA_COMMAND_PATH, commandPath);
+        intent.putExtra(EXTRA_ARGUMENTS, args == null ? new String[] {} : args);
+        intent.putExtra(EXTRA_BACKGROUND, true);
+        intent.putExtra(EXTRA_RUNNER, "app-shell");
+        intent.putExtra(EXTRA_COMMAND_LABEL, "morun media import");
+        intent.putExtra(EXTRA_PENDING_INTENT, pendingIntent);
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent);
+            } else {
+                context.startService(intent);
+            }
+        } catch (Exception error) {
+            activeCommands.remove(requestId);
+            mainHandler.removeCallbacks(pending.timeoutRunnable);
+            return new TermuxCommandResultData(
+                requestId,
+                false,
+                "",
+                error.getMessage() == null ? "Failed to start Termux command." : error.getMessage(),
+                null,
+                false,
+                null,
+                error.getMessage()
+            );
+        }
+
+        try {
+            if (!latch.await(timeoutMs + 2000L, TimeUnit.MILLISECONDS)) {
+                activeCommands.remove(requestId);
+                return new TermuxCommandResultData(requestId, true, "", "", null, true, null, "Termux command timed out.");
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            activeCommands.remove(requestId);
+            return new TermuxCommandResultData(requestId, false, "", "Interrupted.", null, false, null, "Interrupted.");
+        }
+
+        return resultRef.get() == null
+            ? new TermuxCommandResultData(requestId, false, "", "No Termux result.", null, false, null, "No Termux result.")
+            : resultRef.get();
+    }
+
+    private void completePending(PendingTermuxCommand pending, TermuxCommandResultData result) {
+        if (pending.callback != null) {
+            pending.callback.onResult(result);
+            return;
+        }
+
+        if (pending.call != null) {
+            resolveResult(pending.call, result);
+        }
     }
 
     private String[] parseStringArray(PluginCall call, String key) {
@@ -335,6 +493,10 @@ public class TermuxCommandBridge {
 
     private void resolveUnavailable(PluginCall call, String requestId, String message) {
         resolveResult(call, requestId, false, "", message, null, false, null, message);
+    }
+
+    private void resolveResult(PluginCall call, TermuxCommandResultData data) {
+        resolveResult(call, data.requestId, data.available, data.stdout, data.stderr, data.exitCode, data.timedOut, data.errCode, data.errmsg);
     }
 
     private void resolveResult(
@@ -364,6 +526,39 @@ public class TermuxCommandBridge {
         call.resolve(result);
     }
 
+    private int parsePreparedChunkCount(String stdout) {
+        String[] lines = stdout == null ? new String[] {} : stdout.split("\\R");
+        for (String line : lines) {
+            if (line.startsWith("COUNT:")) {
+                try {
+                    return Integer.parseInt(line.substring("COUNT:".length()).trim());
+                } catch (NumberFormatException ignored) {
+                    return -1;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private boolean isSafeTermuxHomePath(String path) {
+        if (path == null || !path.startsWith(TERMUX_HOME_PREFIX) || path.indexOf('\0') >= 0) return false;
+        String[] segments = path.substring(TERMUX_HOME_PREFIX.length()).split("/");
+        for (String segment : segments) {
+            if (segment.equals("..") || segment.trim().isEmpty()) return false;
+        }
+        return true;
+    }
+
+    private String shellQuote(String value) {
+        return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+
+    private String firstNonEmpty(String first, String second, String fallback) {
+        if (first != null && !first.trim().isEmpty()) return first.trim();
+        if (second != null && !second.trim().isEmpty()) return second.trim();
+        return fallback;
+    }
+
     private int clamp(Integer value, int min, int max) {
         int resolved = value == null ? min : value;
         return Math.min(max, Math.max(min, resolved));
@@ -384,14 +579,61 @@ public class TermuxCommandBridge {
         call.resolve(result);
     }
 
+    private interface TermuxCommandCallback {
+        void onResult(TermuxCommandResultData result);
+    }
+
     private static class PendingTermuxCommand {
         final PluginCall call;
         final String requestId;
+        final TermuxCommandCallback callback;
         Runnable timeoutRunnable;
 
         PendingTermuxCommand(PluginCall call, String requestId) {
             this.call = call;
             this.requestId = requestId;
+            this.callback = null;
+        }
+
+        PendingTermuxCommand(String requestId, TermuxCommandCallback callback) {
+            this.call = null;
+            this.requestId = requestId;
+            this.callback = callback;
+        }
+    }
+
+    private static class TermuxCommandResultData {
+        final String requestId;
+        final boolean available;
+        final String stdout;
+        final String stderr;
+        final Integer exitCode;
+        final boolean timedOut;
+        final Integer errCode;
+        final String errmsg;
+
+        TermuxCommandResultData(
+            String requestId,
+            boolean available,
+            String stdout,
+            String stderr,
+            Integer exitCode,
+            boolean timedOut,
+            Integer errCode,
+            String errmsg
+        ) {
+            this.requestId = requestId;
+            this.available = available;
+            this.stdout = stdout == null ? "" : stdout;
+            this.stderr = stderr == null ? "" : stderr;
+            this.exitCode = exitCode;
+            this.timedOut = timedOut;
+            this.errCode = errCode;
+            this.errmsg = errmsg;
+        }
+
+        boolean succeeded() {
+            return available && !timedOut && exitCode != null && exitCode == 0;
         }
     }
 }

@@ -1,7 +1,12 @@
 import type { MorunNativeBridge, TermuxCommandRequest } from '../native/morunNative'
 import type { JsonSchema, ToolDefinition, ToolExecutionResult } from './types'
 
-type TermuxCommandSpec = Omit<TermuxCommandRequest, 'requestId'>
+type TermuxCommandSpec = Omit<TermuxCommandRequest, 'requestId'> & {
+  mediaHint?: {
+    kind: 'image'
+    source: string
+  }
+}
 
 const defaultTimeoutMs = 20000
 const phoneDataDefaultLimit = 5
@@ -274,6 +279,10 @@ export function termuxCommandForTool(toolName: TermuxToolName, args: unknown): T
       return {
         command: 'termux-camera-photo',
         args: ['-c', String(parseInteger(record.cameraId ?? 0, 'cameraId', 0, 4)), outputPath],
+        mediaHint: {
+          kind: 'image',
+          source: outputPath,
+        },
         timeoutMs: 30000,
       }
     }
@@ -309,9 +318,10 @@ async function executeTermuxTool(
 ): Promise<ToolExecutionResult> {
   const requestId = createRequestId(toolName)
   const startedAt = Date.now()
+  const { mediaHint, ...requestSpec } = commandSpec
   const result = await nativeBridge.runTermuxCommand({
     requestId,
-    ...commandSpec,
+    ...requestSpec,
     timeoutMs: commandSpec.timeoutMs ?? defaultTimeoutMs,
   })
   const elapsedMs = Date.now() - startedAt
@@ -331,6 +341,7 @@ async function executeTermuxTool(
     timedOut: result.timedOut,
     stdout: truncate(result.stdout, 4000),
     stderr: truncate(result.stderr, 2000),
+    mediaHint,
   }
 
   if (result.timedOut) {

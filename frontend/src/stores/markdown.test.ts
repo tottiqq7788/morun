@@ -14,15 +14,40 @@ describe('renderMarkdown', () => {
     expect(html).toContain('<code>1+1</code>')
   })
 
-  it('renders remote and local markdown images', () => {
+  it('renders remote images and placeholders for local import sources', () => {
     const remote = renderMarkdown('![照片](https://example.com/photo.jpg)')
-    const local = renderMarkdown('![本地照片](/storage/emulated/0/DCIM/photo.jpg)')
+    const local = renderMarkdown('![本地照片](/data/data/com.termux/files/home/photo.jpg)')
 
     expect(remote).toContain('<img class="markdown-image"')
     expect(remote).toContain('src="https://example.com/photo.jpg"')
     expect(remote).toContain('alt="照片"')
-    expect(local).toContain('<img class="markdown-image"')
-    expect(local).toContain('DCIM/photo.jpg')
+    expect(local).toContain('markdown-image-placeholder')
+    expect(local).toContain('photo.jpg')
+  })
+
+  it('renders morun media images through a resolver', () => {
+    const html = renderMarkdown('![自拍](morun-media://media_test123)', {
+      resolveImage: (source) =>
+        source === 'morun-media://media_test123'
+          ? {
+              mediaId: 'media_test123',
+              fileName: 'selfie.jpg',
+              src: 'http://localhost/_capacitor_file_/selfie.jpg',
+            }
+          : null,
+    })
+
+    expect(html).toContain('<img class="markdown-image"')
+    expect(html).toContain('data-media-id="media_test123"')
+    expect(html).toContain('src="http://localhost/_capacitor_file_/selfie.jpg"')
+  })
+
+  it('renders unknown morun media references as placeholders', () => {
+    const html = renderMarkdown('![自拍](morun-media://media_missing)')
+
+    expect(html).toContain('markdown-image-placeholder')
+    expect(html).toContain('图片尚未导入')
+    expect(html).not.toContain('<img ')
   })
 
   it('allows base64 image data urls', () => {

@@ -1,4 +1,16 @@
-import { Capacitor } from '@capacitor/core'
+import { isImportableImageSource, mediaIdFromUrl } from './media'
+
+export interface MarkdownImageResolution {
+  src?: string
+  mediaId?: string
+  fileName?: string
+  placeholder?: string
+  error?: string
+}
+
+export interface MarkdownRenderOptions {
+  resolveImage?: (source: string, alt: string) => MarkdownImageResolution | null | undefined
+}
 
 interface MarkdownTable {
   headers: string[]
@@ -7,7 +19,7 @@ interface MarkdownTable {
   endIndex: number
 }
 
-export function renderMarkdown(value: string) {
+export function renderMarkdown(value: string, options: MarkdownRenderOptions = {}) {
   const source = value.trim()
   if (!source) return ''
 
@@ -17,7 +29,7 @@ export function renderMarkdown(value: string) {
 
   const flushParagraph = () => {
     if (!paragraph.length) return
-    html.push(`<p>${renderInlineMarkdown(paragraph.join('\n')).replace(/\n/g, '<br>')}</p>`)
+    html.push(`<p>${renderInlineMarkdown(paragraph.join('\n'), options).replace(/\n/g, '<br>')}</p>`)
     paragraph = []
   }
 
@@ -46,7 +58,7 @@ export function renderMarkdown(value: string) {
     const table = parseMarkdownTable(lines, index)
     if (table) {
       flushParagraph()
-      html.push(renderMarkdownTable(table))
+      html.push(renderMarkdownTable(table, options))
       index = table.endIndex
       continue
     }
@@ -55,7 +67,7 @@ export function renderMarkdown(value: string) {
     if (heading) {
       flushParagraph()
       const level = heading[1].length
-      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`)
+      html.push(`<h${level}>${renderInlineMarkdown(heading[2], options)}</h${level}>`)
       continue
     }
 
@@ -69,7 +81,7 @@ export function renderMarkdown(value: string) {
     while (index < lines.length) {
       const item = lines[index].match(/^\s*[-*]\s+(.+)$/)
       if (!item) break
-      unorderedItems.push(`<li>${renderInlineMarkdown(item[1])}</li>`)
+      unorderedItems.push(`<li>${renderInlineMarkdown(item[1], options)}</li>`)
       index += 1
     }
     if (unorderedItems.length) {
@@ -83,7 +95,7 @@ export function renderMarkdown(value: string) {
     while (index < lines.length) {
       const item = lines[index].match(/^\s*\d+\.\s+(.+)$/)
       if (!item) break
-      orderedItems.push(`<li>${renderInlineMarkdown(item[1])}</li>`)
+      orderedItems.push(`<li>${renderInlineMarkdown(item[1], options)}</li>`)
       index += 1
     }
     if (orderedItems.length) {
@@ -102,7 +114,7 @@ export function renderMarkdown(value: string) {
     }
     if (quoteLines.length) {
       flushParagraph()
-      html.push(`<blockquote>${renderMarkdown(quoteLines.join('\n'))}</blockquote>`)
+      html.push(`<blockquote>${renderMarkdown(quoteLines.join('\n'), options)}</blockquote>`)
       index -= 1
       continue
     }
@@ -138,14 +150,14 @@ function parseMarkdownTable(lines: string[], startIndex: number): MarkdownTable 
   }
 }
 
-function renderMarkdownTable(table: MarkdownTable) {
+function renderMarkdownTable(table: MarkdownTable, options: MarkdownRenderOptions) {
   const headerHtml = table.headers
-    .map((cell, index) => `<th${tableCellAlignAttribute(table.alignments[index])}>${renderInlineMarkdown(cell)}</th>`)
+    .map((cell, index) => `<th${tableCellAlignAttribute(table.alignments[index])}>${renderInlineMarkdown(cell, options)}</th>`)
     .join('')
   const bodyHtml = table.rows
     .map((row) => {
       const cells = row
-        .map((cell, index) => `<td${tableCellAlignAttribute(table.alignments[index])}>${renderInlineMarkdown(cell)}</td>`)
+        .map((cell, index) => `<td${tableCellAlignAttribute(table.alignments[index])}>${renderInlineMarkdown(cell, options)}</td>`)
         .join('')
       return `<tr>${cells}</tr>`
     })
@@ -198,7 +210,7 @@ function tableCellAlignAttribute(align: MarkdownTable['alignments'][number]) {
   return align ? ` style="text-align:${align}"` : ''
 }
 
-function renderInlineMarkdown(value: string) {
+function renderInlineMarkdown(value: string, options: MarkdownRenderOptions = {}) {
   const placeholders: string[] = []
   const hold = (html: string) => {
     const key = `\u0000${placeholders.length}\u0000`
@@ -209,9 +221,30 @@ function renderInlineMarkdown(value: string) {
   let text = value.replace(/`([^`\n]+)`/g, (_match, code: string) => hold(`<code>${escapeHtml(code)}</code>`))
 
   text = text.replace(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g, (match, alt: string, rawSrc: string) => {
-    const src = sanitizeMarkdownImageSrc(parseMarkdownDestination(rawSrc))
+    const source = parseMarkdownDestination(rawSrc)
+    const resolved = options.resolveImage?.(source, alt)
+    if (resolved?.src) {
+      return hold(renderMarkdownImage({
+        alt,
+        src: resolved.src,
+        mediaId: resolved.mediaId,
+        fileName: resolved.fileName,
+      }))
+    }
+    if (resolved?.placeholder || resolved?.error) {
+      return hold(renderMarkdownImagePlaceholder(source, resolved.error ?? resolved.placeholder ?? '图片导入中'))
+    }
+
+    const mediaId = mediaIdFromUrl(source)
+    if (mediaId) return hold(renderMarkdownImagePlaceholder(source, '图片尚未导入'))
+
+    if (isImportableImageSource(source) && !/^https:\/\//i.test(source) && !/^data:image\//i.test(source)) {
+      return hold(renderMarkdownImagePlaceholder(source, '图片导入中'))
+    }
+
+    const src = sanitizeMarkdownImageSrc(source)
     if (!src) return match
-    return hold(`<img class="markdown-image" src="${escapeAttribute(src)}" alt="${escapeAttribute(alt)}" loading="lazy">`)
+    return hold(renderMarkdownImage({ alt, src }))
   })
 
   text = text.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, (match, label: string, rawHref: string) => {
@@ -257,18 +290,36 @@ function sanitizeMarkdownImageSrc(value: string) {
   if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return ''
   if (/^https?:\/\//i.test(trimmed)) return trimmed
   if (/^data:image\/(?:png|jpe?g|gif|webp|bmp);base64,[a-z0-9+/=]+$/i.test(trimmed)) return trimmed
-  if (/^(blob:|content:|file:|capacitor:)/i.test(trimmed)) return convertFileSrc(trimmed)
-  if (/^(\/|\.\/|\.\.\/)/.test(trimmed)) return convertFileSrc(trimmed)
 
   return ''
 }
 
-function convertFileSrc(value: string) {
-  try {
-    return Capacitor.convertFileSrc(value) || value
-  } catch {
-    return value
-  }
+function renderMarkdownImage({
+  alt,
+  src,
+  mediaId,
+  fileName,
+}: {
+  alt: string
+  src: string
+  mediaId?: string
+  fileName?: string
+}) {
+  const mediaAttrs = [
+    mediaId ? ` data-media-id="${escapeAttribute(mediaId)}"` : '',
+    fileName ? ` data-file-name="${escapeAttribute(fileName)}"` : '',
+  ].join('')
+  return `<img class="markdown-image" src="${escapeAttribute(src)}" alt="${escapeAttribute(alt)}" loading="lazy"${mediaAttrs}>`
+}
+
+function renderMarkdownImagePlaceholder(source: string, message: string) {
+  return [
+    '<span class="markdown-image-placeholder" data-media-source="',
+    escapeAttribute(source),
+    '">',
+    escapeHtml(message),
+    '</span>',
+  ].join('')
 }
 
 function escapeHtml(value: string) {

@@ -487,11 +487,24 @@ h3 {
 .markdown-image {
   border: 1px solid var(--line);
   border-radius: 8px;
+  cursor: zoom-in;
   display: block;
   height: auto;
   max-height: min(52vh, 420px);
   max-width: 100%;
   object-fit: contain;
+}
+
+.markdown-image-placeholder {
+  background: rgba(138, 98, 64, 0.09);
+  border: 1px dashed rgba(138, 98, 64, 0.28);
+  border-radius: 8px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 700;
+  margin: 2px 0;
+  padding: 9px 10px;
 }
 
 .markdown-body a {
@@ -547,7 +560,8 @@ h3 {
 }
 
 .message-row.user .markdown-image,
-.message-row.user .markdown-table-wrap {
+.message-row.user .markdown-table-wrap,
+.message-row.user .markdown-image-placeholder {
   border-color: rgba(255, 255, 255, 0.24);
 }
 
@@ -724,6 +738,30 @@ h3 {
   overflow-wrap: anywhere;
   padding: 8px 9px;
   white-space: pre-wrap;
+}
+
+.message-media-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+}
+
+.message-media-thumb {
+  background: #fffaf4;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: zoom-in;
+  overflow: hidden;
+  padding: 0;
+  width: 100%;
+}
+
+.message-media-thumb img {
+  aspect-ratio: 1;
+  display: block;
+  height: auto;
+  object-fit: cover;
+  width: 100%;
 }
 
 .composer {
@@ -1235,6 +1273,66 @@ h3 {
   min-height: 0;
   overflow-y: auto;
   white-space: pre-wrap;
+}
+
+.media-preview-layer {
+  align-items: center;
+  animation: fade-in 160ms ease both;
+  background: rgba(26, 22, 18, 0.48);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 18px;
+  position: fixed;
+  z-index: 45;
+}
+
+.media-preview-dialog {
+  background: var(--panel);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 12px;
+  max-height: min(760px, calc(100dvh - 36px));
+  max-width: min(720px, 100%);
+  padding: 16px;
+  width: 100%;
+}
+
+.media-preview-dialog > header,
+.media-preview-dialog > footer {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.media-preview-dialog h2 {
+  font-size: 18px;
+  margin: 0;
+  word-break: break-all;
+}
+
+.media-preview-dialog > footer {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.media-preview-stage {
+  align-items: center;
+  background: #1f1b17;
+  border-radius: 8px;
+  display: flex;
+  justify-content: center;
+  min-height: 220px;
+  overflow: hidden;
+}
+
+.media-preview-stage img {
+  display: block;
+  max-height: min(62dvh, 560px);
+  max-width: 100%;
+  object-fit: contain;
 }
 
 .account-dialog {

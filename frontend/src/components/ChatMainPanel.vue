@@ -53,6 +53,7 @@ const props = defineProps<{
   toolSubtitle: (message: ChatMessage) => string
   toolStatusSummary: (message: ChatMessage) => string
   hasToolDetails: (message: ChatMessage) => boolean
+  toolCommandDetail: (message: ChatMessage) => string
   formatToolArgs: (message: ChatMessage) => string
   formatToolOutput: (message: ChatMessage) => string
 }>()
@@ -556,9 +557,9 @@ defineExpose({
             <span>{{ toolStatusSummary(toolDialogMessage) }}</span>
           </div>
 
-          <div v-if="toolSubtitle(toolDialogMessage)" class="tool-detail-block">
+          <div v-if="toolCommandDetail(toolDialogMessage)" class="tool-detail-block">
             <span>命令详情</span>
-            <pre>{{ toolSubtitle(toolDialogMessage) }}</pre>
+            <pre>{{ toolCommandDetail(toolDialogMessage) }}</pre>
           </div>
 
           <div v-if="formatToolArgs(toolDialogMessage)" class="tool-detail-block">
@@ -587,7 +588,7 @@ defineExpose({
           </section>
 
           <p
-            v-if="!toolSubtitle(toolDialogMessage) && !hasToolDetails(toolDialogMessage) && !toolDialogMessage.mediaAttachments?.length"
+            v-if="!toolCommandDetail(toolDialogMessage) && !hasToolDetails(toolDialogMessage) && !toolDialogMessage.mediaAttachments?.length"
             class="tool-dialog-empty"
           >
             暂无更多详情

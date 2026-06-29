@@ -886,6 +886,17 @@ function hasToolDetails(message: ChatMessage) {
   return Boolean(formatToolArgs(message) || formatToolOutput(message))
 }
 
+function toolCommandDetail(message: ChatMessage) {
+  const result = message.toolResult
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return ''
+
+  const record = result as Record<string, unknown>
+  if (typeof record.command !== 'string' || !record.command.trim()) return ''
+
+  const args = Array.isArray(record.args) ? record.args.map((arg) => String(arg)) : []
+  return [record.command.trim(), ...args.map((arg) => JSON.stringify(arg))].join(' ')
+}
+
 function formatToolArgs(message: ChatMessage) {
   return stringifyCompact(message.toolArgs)
 }
@@ -1118,6 +1129,7 @@ function handleSwipeLeft() {
       :tool-subtitle="toolSubtitle"
       :tool-status-summary="toolStatusSummary"
       :has-tool-details="hasToolDetails"
+      :tool-command-detail="toolCommandDetail"
       :format-tool-args="formatToolArgs"
       :format-tool-output="formatToolOutput"
       @toggle-sidebar="sidebarOpen = !sidebarOpen"

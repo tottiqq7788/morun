@@ -37,6 +37,7 @@ import {
   getProviderById,
   normalizeModels,
   providerPresets,
+  removeModelAccountConfig,
   trimTrailingSlash,
   useChatStore,
   type ChatMessage,
@@ -53,6 +54,7 @@ import {
   type MediaAttachment,
 } from './stores/media'
 import {
+  clearStoredModelAccountApiKey,
   migrateModelAccountSecrets,
   resolveModelAccountApiKey,
   withStoredModelAccountApiKey,
@@ -74,6 +76,7 @@ import {
   type DebugLogEntryInput,
   type DebugLogInfo,
 } from './stores/debugLog'
+import { extractProviderErrorMessage, getFriendlyRequestErrorMessage } from './stores/requestErrors'
 import { rollbackChatTurnToDraft } from './stores/chatTurns'
 import {
   buildSessionTitleMessages,
@@ -89,7 +92,6 @@ interface AccountDraft {
   providerId: string
   name: string
   apiKey: string
-  model: string
   availableModels: string[]
   lastTestedAt?: number
 }
@@ -152,6 +154,7 @@ const toolRegistry = computed(() =>
       searchTools: {
         resolveApiKey: () => resolveTavilyApiKey(tavilyConfig.value, nativeBridge),
       },
+      getModelInfo: () => buildConfiguredModelInfo(),
     },
     toolPolicy.value,
   ),
@@ -162,6 +165,8 @@ const draft = ref('')
 const configOpen = ref(false)
 const sidebarOpen = ref(false)
 const accountDialogOpen = ref(false)
+const pendingModelAccountDelete = ref<ModelAccount | null>(null)
+const accountDeleteBusy = ref(false)
 const accountDraft = ref<AccountDraft>(createAccountDraft('deepseek'))
 const isGenerating = ref(false)
 const isTestingConnection = ref(false)
@@ -187,10 +192,6 @@ const connectionStatus = ref<ConnectionStatus>({
 
 const draftProvider = computed(() => {
   return getProviderById(accountDraft.value.providerId)
-})
-
-const draftModels = computed(() => {
-  return accountModels(accountDraft.value)
 })
 
 onMounted(async () => {
@@ -328,6 +329,7 @@ async function clearDiagnosticLogs() {
 function closeSettings() {
   configOpen.value = false
   accountDialogOpen.value = false
+  pendingModelAccountDelete.value = null
 }
 
 function deleteActiveSessionFromSettings() {
@@ -347,6 +349,64 @@ function openAccountDialog() {
   accountDialogOpen.value = true
 }
 
+function buildConfiguredModelInfo() {
+  const activeAccount = activeModelAccount.value
+  const activeId = activeAccount?.id ?? ''
+  const accounts = modelConfig.value.accounts.map((account) => {
+    const provider = getProviderById(account.providerId)
+
+    return {
+      id: account.id,
+      providerId: account.providerId,
+      providerName: provider.name,
+      displayName: accountDisplayName(account),
+      model: account.model,
+      availableModels: accountModels(account),
+      isActive: account.id === activeId,
+      apiKeyConfigured: Boolean(account.apiKey.trim() || account.apiKeyRef),
+      lastTestedAt: account.lastTestedAt,
+    }
+  })
+  const active = accounts.find((account) => account.isActive) ?? null
+
+  return {
+    activeAccountId: active?.id ?? '',
+    activeProviderName: active?.providerName ?? '',
+    activeModel: active?.model ?? '',
+    accounts,
+  }
+}
+
+function accountModelCountLabel(account: ModelAccount) {
+  const count = accountModels(account).length
+  return count ? `${count} 个可选模型` : '未获取模型列表'
+}
+
+function openModelAccountDeleteDialog(account: ModelAccount) {
+  pendingModelAccountDelete.value = account
+}
+
+function closeModelAccountDeleteDialog() {
+  if (accountDeleteBusy.value) return
+  pendingModelAccountDelete.value = null
+}
+
+async function confirmDeleteModelAccount() {
+  const account = pendingModelAccountDelete.value
+  if (!account || accountDeleteBusy.value) return
+
+  accountDeleteBusy.value = true
+  try {
+    await clearStoredModelAccountApiKey(account, nativeBridge)
+    modelConfig.value = removeModelAccountConfig(modelConfig.value, account.id)
+    pendingModelAccountDelete.value = null
+  } catch (error) {
+    console.warn('删除模型配置失败', error)
+  } finally {
+    accountDeleteBusy.value = false
+  }
+}
+
 function createAccountDraft(providerId = defaultConfigProviderId()): AccountDraft {
   const provider = getProviderById(providerId)
 
@@ -354,7 +414,6 @@ function createAccountDraft(providerId = defaultConfigProviderId()): AccountDraf
     providerId: provider.id,
     name: '',
     apiKey: '',
-    model: provider.models[0] ?? '',
     availableModels: [],
   }
 }
@@ -384,9 +443,7 @@ async function maybeQueueActiveSessionTitleGeneration() {
 }
 
 function updateDraftProvider() {
-  const provider = draftProvider.value
   accountDraft.value.apiKey = ''
-  accountDraft.value.model = provider.models[0] ?? ''
   accountDraft.value.availableModels = []
   accountDraft.value.lastTestedAt = undefined
   connectionStatus.value = {
@@ -431,11 +488,12 @@ async function testDraftConnection() {
     const models = remoteModels.length ? remoteModels : provider.models
 
     accountDraft.value.availableModels = models
-    accountDraft.value.model = models.includes(accountDraft.value.model) ? accountDraft.value.model : models[0] || ''
     accountDraft.value.lastTestedAt = Date.now()
     connectionStatus.value = {
       state: 'success',
-      text: remoteModels.length ? `连接成功，发现 ${remoteModels.length} 个模型。` : '连接成功，已使用推荐模型列表。',
+      text: remoteModels.length
+        ? `连接成功，发现 ${remoteModels.length} 个模型，保存后可在对话页选择。`
+        : '连接成功，已使用推荐模型列表，保存后可在对话页选择。',
     }
   } catch (error) {
     connectionStatus.value = {
@@ -451,7 +509,7 @@ async function saveAccountDraft() {
   const provider = draftProvider.value
   const models = normalizeModels(accountDraft.value.availableModels)
   const modelPool = models.length ? models : provider.models
-  const model = modelPool.includes(accountDraft.value.model) ? accountDraft.value.model : modelPool[0] || ''
+  const model = modelPool[0] || ''
   const sameProviderCount = modelConfig.value.accounts.filter((account) => account.providerId === provider.id).length
   const now = Date.now()
   const account: ModelAccount = {
@@ -1198,7 +1256,12 @@ function formatRequestError(error: unknown) {
   }
 
   const message = error instanceof Error ? error.message : '未知错误'
-  return `请求失败：${shortenError(message)}`
+  const friendlyMessage = getFriendlyRequestErrorMessage(message)
+  if (friendlyMessage) {
+    return friendlyMessage
+  }
+
+  return `请求失败：${shortenError(extractProviderErrorMessage(message) ?? message)}`
 }
 
 function shortenError(message: string) {
@@ -1575,20 +1638,33 @@ function handleSwipeLeft() {
             </div>
 
             <div v-if="modelConfig.accounts.length" class="model-account-list">
-              <button
+              <article
                 v-for="account in modelConfig.accounts"
                 :key="account.id"
                 :class="['model-account-card', { selected: account.id === activeModelAccount?.id }]"
-                type="button"
-                :aria-pressed="account.id === activeModelAccount?.id"
-                @click="modelConfig.activeAccountId = account.id"
               >
-                <span>
-                  <strong>{{ accountDisplayName(account) }}</strong>
-                  <small>{{ account.model || '未选择模型' }}</small>
-                </span>
-                <small>{{ accountTestLabel(account) }}</small>
-              </button>
+                <button
+                  class="model-account-select"
+                  type="button"
+                  :aria-pressed="account.id === activeModelAccount?.id"
+                  @click="modelConfig.activeAccountId = account.id"
+                >
+                  <span>
+                    <strong>{{ accountDisplayName(account) }}</strong>
+                    <small>{{ accountModelCountLabel(account) }}</small>
+                  </span>
+                  <small>{{ accountTestLabel(account) }}</small>
+                </button>
+                <button
+                  class="icon-button danger model-account-delete"
+                  type="button"
+                  :aria-label="`删除模型配置 ${accountDisplayName(account)}`"
+                  :title="`删除模型配置 ${accountDisplayName(account)}`"
+                  @click="openModelAccountDeleteDialog(account)"
+                >
+                  <Trash2 :size="16" />
+                </button>
+              </article>
             </div>
             <p v-else class="empty-copy">还没有模型配置。添加后可以在对话顶部切换厂商和模型。</p>
           </section>
@@ -1684,13 +1760,6 @@ function handleSwipeLeft() {
                 {{ isTestingConnection ? '测试中' : '测试连接' }}
               </button>
             </div>
-
-            <label>
-              默认模型
-              <select v-model="accountDraft.model">
-                <option v-for="model in draftModels" :key="model" :value="model">{{ model }}</option>
-              </select>
-            </label>
           </section>
 
           <footer>
@@ -1698,6 +1767,50 @@ function handleSwipeLeft() {
             <button class="primary-button" type="button" @click="saveAccountDraft">
               <Save :size="16" />
               保存配置
+            </button>
+          </footer>
+        </div>
+      </section>
+
+      <section
+        v-if="pendingModelAccountDelete"
+        class="account-dialog-layer"
+        aria-label="删除模型配置"
+        @click.self="closeModelAccountDeleteDialog"
+      >
+        <div class="account-dialog account-delete-dialog">
+          <header>
+            <div>
+              <p class="eyebrow">模型配置</p>
+              <h2>删除配置</h2>
+            </div>
+            <button
+              class="icon-button"
+              type="button"
+              aria-label="关闭删除确认"
+              title="关闭删除确认"
+              :disabled="accountDeleteBusy"
+              @click="closeModelAccountDeleteDialog"
+            >
+              <X :size="18" />
+            </button>
+          </header>
+
+          <section class="account-delete-body">
+            <p>删除后将移除这个模型配置，并清理已保存的接口密钥。</p>
+            <div class="account-delete-summary">
+              <strong>{{ accountDisplayName(pendingModelAccountDelete) }}</strong>
+              <small>{{ accountModelCountLabel(pendingModelAccountDelete) }}</small>
+            </div>
+          </section>
+
+          <footer>
+            <button class="secondary-button" type="button" :disabled="accountDeleteBusy" @click="closeModelAccountDeleteDialog">
+              取消
+            </button>
+            <button class="danger-button compact-danger" type="button" :disabled="accountDeleteBusy" @click="confirmDeleteModelAccount">
+              <Trash2 :size="16" />
+              {{ accountDeleteBusy ? '删除中' : '删除配置' }}
             </button>
           </footer>
         </div>

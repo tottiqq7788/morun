@@ -7,10 +7,33 @@ interface AgentNote {
   createdAt: string
 }
 
+export interface ConfiguredModelAccountInfo {
+  id: string
+  providerId: string
+  providerName: string
+  displayName: string
+  model: string
+  availableModels: string[]
+  isActive: boolean
+  apiKeyConfigured: boolean
+  lastTestedAt?: number
+}
+
+export interface ConfiguredModelInfo {
+  activeAccountId: string
+  activeProviderName: string
+  activeModel: string
+  accounts: ConfiguredModelAccountInfo[]
+}
+
+export interface BuiltinToolsContext extends Pick<ToolExecutionContext, 'storage' | 'now'> {
+  getModelInfo?: () => ConfiguredModelInfo
+}
+
 export const notesKey = 'morun.agent-notes.v1'
 const maxExpressionLength = 160
 
-export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage' | 'now'> = {}): ToolDefinition[] {
+export function createBuiltinTools(context: BuiltinToolsContext = {}): ToolDefinition[] {
   return [
     {
       name: 'get_current_time',
@@ -81,6 +104,27 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
             expression: record.expression,
             result,
           },
+        }
+      },
+    },
+    {
+      name: 'get_configured_model_info',
+      description:
+        '读取 morun 当前已配置的模型账号、当前正在使用的模型、模型所属厂商和可选模型列表。用户询问“你是什么模型”“当前用的是哪个模型”“有哪些模型配置”时应调用。不会返回 API Key。',
+      source: 'builtin',
+      riskLevel: 'safe',
+      permission: 'none',
+      requiresConfirmation: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+      },
+      execute: async () => {
+        const info = context.getModelInfo?.() ?? emptyModelInfo()
+
+        return {
+          text: formatConfiguredModelInfo(info),
+          data: info,
         }
       },
     },
@@ -209,6 +253,41 @@ export function createBuiltinTools(context: Pick<ToolExecutionContext, 'storage'
       },
     },
   ]
+}
+
+export function formatConfiguredModelInfo(info: ConfiguredModelInfo) {
+  if (!info.accounts.length) {
+    return '当前没有已配置的模型账号。'
+  }
+
+  const activeAccount = info.accounts.find((account) => account.isActive)
+  const lines = [
+    `当前使用模型：${info.activeModel || '未选择模型'}`,
+    `所属厂商：${info.activeProviderName || '未知厂商'}`,
+  ]
+
+  if (activeAccount) {
+    lines.push(`配置名称：${activeAccount.displayName}`)
+  }
+
+  lines.push('', '已配置模型账号：')
+  for (const [index, account] of info.accounts.entries()) {
+    const models = summarizeModels(account.availableModels)
+    lines.push(
+      `${index + 1}. ${account.displayName}${account.isActive ? '（当前使用）' : ''} - 厂商：${account.providerName}，当前模型：${account.model || '未选择模型'}，可选模型：${models}`,
+    )
+  }
+
+  return lines.join('\n')
+}
+
+function emptyModelInfo(): ConfiguredModelInfo {
+  return {
+    activeAccountId: '',
+    activeProviderName: '',
+    activeModel: '',
+    accounts: [],
+  }
 }
 
 export function calculateExpression(expression: string): number {
@@ -371,6 +450,14 @@ function isAgentNote(value: unknown): value is AgentNote {
 function clampLimit(limit: number) {
   if (!Number.isFinite(limit)) return 5
   return Math.min(5, Math.max(1, Math.floor(limit)))
+}
+
+function summarizeModels(models: string[]) {
+  if (!models.length) return '无'
+
+  const visibleModels = models.slice(0, 12).join('、')
+  const hiddenCount = models.length - 12
+  return hiddenCount > 0 ? `${visibleModels} 等 ${models.length} 个` : visibleModels
 }
 
 function formatNumber(value: number) {

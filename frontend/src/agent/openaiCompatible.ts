@@ -67,19 +67,45 @@ export const requestChatCompletion: ChatCompletionClient = async (request) => {
 }
 
 export function buildChatCompletionRequestBody(request: ChatCompletionRequest) {
-  return {
+  const body: Record<string, unknown> = {
     model: request.modelConfig.model,
     messages: request.messages.map(toProviderMessage),
-    temperature: Number(request.modelConfig.temperature),
-    max_tokens: Number(request.modelConfig.maxTokens) || undefined,
     stream: request.modelConfig.stream,
-    ...(request.useTools && request.tools.length
-      ? {
-          tools: request.tools.map(toProviderTool),
-          tool_choice: 'auto',
-        }
-      : {}),
   }
+
+  if (supportsCustomSamplingParameters(request.modelConfig.model)) {
+    body.temperature = Number(request.modelConfig.temperature)
+  }
+
+  const maxTokens = Number(request.modelConfig.maxTokens) || undefined
+  if (maxTokens) {
+    body[chatCompletionTokenLimitField(request.modelConfig.model)] = maxTokens
+  }
+
+  if (request.useTools && request.tools.length) {
+    body.tools = request.tools.map(toProviderTool)
+    body.tool_choice = 'auto'
+  }
+
+  return body
+}
+
+export function chatCompletionTokenLimitField(model: string): 'max_tokens' | 'max_completion_tokens' {
+  return isReasoningStyleChatModel(model) ? 'max_completion_tokens' : 'max_tokens'
+}
+
+export function supportsCustomSamplingParameters(model: string) {
+  return !isReasoningStyleChatModel(model)
+}
+
+function isReasoningStyleChatModel(model: string) {
+  const leafModel = normalizeModelLeaf(model)
+  return /^(gpt-5|o1|o3|o4)(?:[\w.-]*)?$/.test(leafModel)
+}
+
+function normalizeModelLeaf(model: string) {
+  const normalized = model.trim().toLowerCase()
+  return normalized.split('/').pop() ?? normalized
 }
 
 function toProviderMessage(message: AgentMessage) {

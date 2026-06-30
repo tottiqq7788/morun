@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import type { StorageLike } from '../agent/types'
 import {
+  defaultConfig,
   legacyConfigKey,
   legacySessionsKey,
   buildAgentMessages,
   loadConfig,
   loadSessions,
+  removeModelAccountConfig,
   sessionsKey,
   useChatStore,
   type ChatMessage,
+  type ModelConfig,
   type ChatSession,
 } from './chat'
 
@@ -302,6 +305,38 @@ describe('chat store persistence', () => {
     })
   })
 
+  it('removes inactive model accounts without changing the active account', () => {
+    const config = createModelConfig('account_1')
+
+    const nextConfig = removeModelAccountConfig(config, 'account_2')
+
+    expect(nextConfig.accounts.map((account) => account.id)).toEqual(['account_1', 'account_3'])
+    expect(nextConfig.activeAccountId).toBe('account_1')
+  })
+
+  it('selects the next or previous account after deleting the active account', () => {
+    const deleteMiddle = removeModelAccountConfig(createModelConfig('account_2'), 'account_2')
+    const deleteLast = removeModelAccountConfig(createModelConfig('account_3'), 'account_3')
+
+    expect(deleteMiddle.accounts.map((account) => account.id)).toEqual(['account_1', 'account_3'])
+    expect(deleteMiddle.activeAccountId).toBe('account_3')
+    expect(deleteLast.accounts.map((account) => account.id)).toEqual(['account_1', 'account_2'])
+    expect(deleteLast.activeAccountId).toBe('account_2')
+  })
+
+  it('allows deleting the final model account', () => {
+    const config = createModelConfig('account_1')
+    const singleAccountConfig: ModelConfig = {
+      ...config,
+      accounts: [config.accounts[0]],
+    }
+
+    const nextConfig = removeModelAccountConfig(singleAccountConfig, 'account_1')
+
+    expect(nextConfig.accounts).toEqual([])
+    expect(nextConfig.activeAccountId).toBe('')
+  })
+
   it('creates, selects, and deletes sessions without leaving an empty store', () => {
     const store = useChatStore(createMemoryStorage())
     const originalSessionId = store.activeSessionId.value
@@ -447,6 +482,31 @@ function createMemoryStorage(initial: Record<string, string> = {}): StorageLike 
     removeItem(key) {
       data.delete(key)
     },
+  }
+}
+
+function createModelConfig(activeAccountId: string): ModelConfig {
+  return {
+    ...defaultConfig,
+    activeAccountId,
+    accounts: [
+      createModelAccount('account_1', 'DeepSeek', 'deepseek-chat'),
+      createModelAccount('account_2', 'OpenAI', 'gpt-5'),
+      createModelAccount('account_3', 'Kimi', 'moonshot-v1-8k'),
+    ],
+  }
+}
+
+function createModelAccount(id: string, name: string, model: string): ModelConfig['accounts'][number] {
+  return {
+    id,
+    providerId: 'deepseek',
+    name,
+    apiKey: `key-${id}`,
+    model,
+    availableModels: [],
+    createdAt: 1,
+    updatedAt: 1,
   }
 }
 

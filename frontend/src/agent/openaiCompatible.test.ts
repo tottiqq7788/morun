@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { requestChatCompletion } from './openaiCompatible'
+import {
+  buildChatCompletionRequestBody,
+  chatCompletionTokenLimitField,
+  requestChatCompletion,
+  supportsCustomSamplingParameters,
+} from './openaiCompatible'
 import type { ChatCompletionRequest } from './types'
 
 const baseRequest: ChatCompletionRequest = {
@@ -179,6 +184,45 @@ describe('requestChatCompletion streaming', () => {
         signal: controller.signal,
       }),
     ).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+describe('chat completion request body', () => {
+  it('uses max_completion_tokens and default sampling for GPT-5 style models', () => {
+    const body = buildChatCompletionRequestBody({
+      ...baseRequest,
+      modelConfig: {
+        ...baseRequest.modelConfig,
+        model: 'gpt-5',
+      },
+    })
+
+    expect(body).toMatchObject({
+      model: 'gpt-5',
+      max_completion_tokens: 1024,
+    })
+    expect(body).not.toHaveProperty('max_tokens')
+    expect(body).not.toHaveProperty('temperature')
+    expect(chatCompletionTokenLimitField('openai/gpt-5-mini')).toBe('max_completion_tokens')
+    expect(supportsCustomSamplingParameters('o3-mini')).toBe(false)
+  })
+
+  it('keeps max_tokens and temperature for regular chat models', () => {
+    const body = buildChatCompletionRequestBody({
+      ...baseRequest,
+      modelConfig: {
+        ...baseRequest.modelConfig,
+        model: 'gpt-4o-mini',
+      },
+    })
+
+    expect(body).toMatchObject({
+      model: 'gpt-4o-mini',
+      max_tokens: 1024,
+      temperature: 0.7,
+    })
+    expect(body).not.toHaveProperty('max_completion_tokens')
+    expect(supportsCustomSamplingParameters('deepseek-chat')).toBe(true)
   })
 })
 

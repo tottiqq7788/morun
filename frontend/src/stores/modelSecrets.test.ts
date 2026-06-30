@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { MorunNativeBridge } from '../native/morunNative'
 import { defaultConfig, type ModelConfig } from './chat'
 import {
+  clearStoredModelAccountApiKey,
   migrateModelAccountSecrets,
   modelAccountApiKeyRef,
   resolveModelAccountApiKey,
@@ -73,6 +74,29 @@ describe('model account secrets', () => {
     await expect(
       withStoredModelAccountApiKey(account, 'fresh-key', createBridge({ available: true, canStore: false })),
     ).rejects.toThrow('无法安全保存接口密钥')
+  })
+
+  it('clears secure API keys when model accounts are deleted', async () => {
+    const secureValues = new Map([[modelAccountApiKeyRef('account_1'), 'native-key']])
+    const account = createConfig({
+      apiKey: '',
+      apiKeyRef: modelAccountApiKeyRef('account_1'),
+    }).accounts[0]
+
+    await expect(clearStoredModelAccountApiKey(account, createBridge({ available: true, secureValues }))).resolves.toBe(
+      true,
+    )
+
+    expect(secureValues.has(modelAccountApiKeyRef('account_1'))).toBe(false)
+  })
+
+  it('treats local-only API keys as already clearable', async () => {
+    const account = createConfig({
+      apiKey: 'dev-key',
+      apiKeyRef: undefined,
+    }).accounts[0]
+
+    await expect(clearStoredModelAccountApiKey(account, createBridge({ available: false }))).resolves.toBe(true)
   })
 })
 

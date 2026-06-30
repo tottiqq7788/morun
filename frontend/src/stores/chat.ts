@@ -360,6 +360,22 @@ export function loadConfig(storage: StorageLike): ModelConfig {
   }
 }
 
+export function removeModelAccountConfig(config: ModelConfig, accountId: string): ModelConfig {
+  const removeIndex = config.accounts.findIndex((account) => account.id === accountId)
+  if (removeIndex < 0) return config
+
+  const accounts = config.accounts.filter((account) => account.id !== accountId)
+  const activeStillExists = accounts.some((account) => account.id === config.activeAccountId)
+  const removedActive = config.activeAccountId === accountId
+  const fallbackAccount = removedActive ? accounts[Math.min(removeIndex, accounts.length - 1)] : accounts[0]
+
+  return {
+    ...config,
+    accounts,
+    activeAccountId: activeStillExists && !removedActive ? config.activeAccountId : fallbackAccount?.id ?? '',
+  }
+}
+
 export function safeParse<T>(value: string | null): T | null {
   if (!value) return null
 

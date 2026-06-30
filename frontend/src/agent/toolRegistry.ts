@@ -1,10 +1,10 @@
-import { createBuiltinTools } from './builtinTools'
+import { createBuiltinTools, type BuiltinToolsContext } from './builtinTools'
 import { createNativeTools } from './nativeTools'
 import { createSearchTools, type SearchToolsContext } from './searchTools'
 import { createTermuxTools } from './termuxTools'
 import { applyToolPolicy, type ToolPolicyConfig } from './toolPolicy'
 import { morunNativeBridge, type MorunNativeBridge } from '../native/morunNative'
-import type { ToolDefinition, ToolExecutionContext } from './types'
+import type { ToolDefinition } from './types'
 
 export interface ToolRegistry {
   tools: ToolDefinition[]
@@ -13,7 +13,7 @@ export interface ToolRegistry {
   getTitle(name: string): string
 }
 
-export interface ToolRegistryContext extends Pick<ToolExecutionContext, 'storage' | 'now'> {
+export interface ToolRegistryContext extends BuiltinToolsContext {
   nativeBridge?: MorunNativeBridge
   searchTools?: SearchToolsContext
 }
@@ -22,6 +22,7 @@ const toolTitles: Record<string, string> = {
   morun_media_import: '导入媒体',
   calculate: '安全计算',
   clear_notes: '清空记忆',
+  get_configured_model_info: '模型信息',
   get_current_time: '读取当前时间',
   native_open_url: '打开链接',
   recall_notes: '检索记忆',

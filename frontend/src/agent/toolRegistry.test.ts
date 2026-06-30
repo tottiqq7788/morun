@@ -3,6 +3,27 @@ import { createToolRegistry } from './toolRegistry'
 import type { MorunNativeBridge } from '../native/morunNative'
 
 describe('tool registry', () => {
+  it('registers model info as a safe built-in tool', () => {
+    const registry = createToolRegistry({
+      nativeBridge: createBridge(),
+      getModelInfo: () => ({
+        activeAccountId: 'account_1',
+        activeProviderName: 'OpenAI',
+        activeModel: 'gpt-5',
+        accounts: [],
+      }),
+    })
+
+    expect(registry.getTitle('get_configured_model_info')).toBe('模型信息')
+    expect(registry.getTool('get_configured_model_info')).toMatchObject({
+      name: 'get_configured_model_info',
+      source: 'builtin',
+      riskLevel: 'safe',
+      permission: 'none',
+      requiresConfirmation: false,
+    })
+  })
+
   it('registers Tavily as a network tool', () => {
     const registry = createToolRegistry({
       nativeBridge: createBridge(),

@@ -35,6 +35,16 @@ export async function resolveModelAccountApiKey(account: ModelAccount, nativeBri
   return account.apiKey
 }
 
+export async function clearStoredModelAccountApiKey(account: ModelAccount, nativeBridge: MorunNativeBridge) {
+  if (!account.apiKeyRef) return true
+
+  try {
+    return await nativeBridge.secureDelete(account.apiKeyRef)
+  } catch {
+    return false
+  }
+}
+
 export async function withStoredModelAccountApiKey(
   account: ModelAccount,
   apiKey: string,

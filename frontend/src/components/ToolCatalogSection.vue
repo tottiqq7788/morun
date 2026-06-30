@@ -104,6 +104,7 @@ function toolSourceLabel(source: ToolSource) {
     builtin: '内置工具',
     native: '原生工具',
     termux: 'Termux 工具',
+    network: '联网工具',
     mcp: 'MCP 工具',
     plugin: '插件工具',
   }
@@ -115,6 +116,7 @@ function toolSourceDescription(source: ToolSource) {
     builtin: '应用内置能力，不依赖手机系统权限。',
     native: '通过手机原生桥调用系统能力。',
     termux: '通过 Termux:API 调用更多手机能力。',
+    network: '通过外部网络服务获取实时信息。',
     mcp: '由 MCP 服务提供的外部能力。',
     plugin: '由插件扩展提供的工具能力。',
   }

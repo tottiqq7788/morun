@@ -15,7 +15,7 @@ export interface ToolCall {
   rawArguments: string
 }
 
-export type ToolSource = 'builtin' | 'native' | 'termux' | 'mcp' | 'plugin'
+export type ToolSource = 'builtin' | 'native' | 'termux' | 'network' | 'mcp' | 'plugin'
 export type ToolRiskLevel = 'safe' | 'low' | 'medium' | 'high'
 export type ToolPermission =
   | 'none'

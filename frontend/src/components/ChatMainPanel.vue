@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   Menu,
   MessageSquare,
+  Plus,
   Send,
   Settings,
   Square,
@@ -61,6 +62,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   toggleSidebar: []
+  createSession: []
   openSettings: []
   sendMessage: []
   stopGeneration: []
@@ -214,7 +216,7 @@ function openToolDialog(message: ChatMessage) {
 
 function assistantDisplayContent(message: ChatMessage) {
   if (message.content.trim()) return message.content
-  if (message.status === 'streaming') return '正在连接模型...'
+  if (message.status === 'streaming') return '思考中...'
   if (message.error) return ''
   return '模型没有返回内容。'
 }
@@ -355,6 +357,9 @@ defineExpose({
       </div>
 
       <div class="header-actions">
+        <button class="icon-button" type="button" aria-label="新建会话" title="新建会话" @click="emit('createSession')">
+          <Plus :size="18" />
+        </button>
         <button class="icon-button" type="button" aria-label="模型设置" title="模型设置" @click="emit('openSettings')">
           <Settings :size="18" />
         </button>

@@ -9,6 +9,7 @@ import {
   X,
 } from '@lucide/vue'
 import ChatMainPanel from './components/ChatMainPanel.vue'
+import TavilySearchConfigCard from './components/TavilySearchConfigCard.vue'
 import TermuxEnvironmentCard from './components/TermuxEnvironmentCard.vue'
 import ToolCatalogSection, { type ToolPolicyUpdate } from './components/ToolCatalogSection.vue'
 import ToolConfirmationDialog from './components/ToolConfirmationDialog.vue'
@@ -55,6 +56,15 @@ import {
   resolveModelAccountApiKey,
   withStoredModelAccountApiKey,
 } from './stores/modelSecrets'
+import {
+  clearStoredTavilyApiKey,
+  hasConfiguredTavilyApiKey,
+  loadTavilyConfig,
+  migrateTavilyConfigSecret,
+  resolveTavilyApiKey,
+  saveTavilyConfig,
+  withStoredTavilyApiKey,
+} from './stores/tavilyConfig'
 import { renderMarkdown } from './stores/markdown'
 import { rollbackChatTurnToDraft } from './stores/chatTurns'
 import {
@@ -117,7 +127,20 @@ const {
 const nativeBridge = morunNativeBridge
 const chatCompletionClient = createChatCompletionClient({ nativeBridge })
 const toolPolicy = ref(loadToolPolicy())
-const toolRegistry = computed(() => createToolRegistry({ storage: localStorage, nativeBridge }, toolPolicy.value))
+const tavilyConfig = ref(loadTavilyConfig())
+const tavilyConfigured = computed(() => hasConfiguredTavilyApiKey(tavilyConfig.value))
+const toolRegistry = computed(() =>
+  createToolRegistry(
+    {
+      storage: localStorage,
+      nativeBridge,
+      searchTools: {
+        resolveApiKey: () => resolveTavilyApiKey(tavilyConfig.value, nativeBridge),
+      },
+    },
+    toolPolicy.value,
+  ),
+)
 const agentTools = computed(() => toolRegistry.value.tools)
 const catalogTools = computed(() => toolRegistry.value.catalogTools)
 const draft = ref('')
@@ -158,6 +181,10 @@ const draftModels = computed(() => {
 onMounted(async () => {
   if (await migrateModelAccountSecrets(modelConfig.value, nativeBridge)) {
     chatStore.saveConfig()
+  }
+
+  if (await migrateTavilyConfigSecret(tavilyConfig.value, nativeBridge)) {
+    saveTavilyConfig(tavilyConfig.value)
   }
 })
 
@@ -236,6 +263,16 @@ function resetConfig() {
 function saveConfig() {
   chatStore.saveConfig()
   closeSettings()
+}
+
+async function saveTavilyApiKey(apiKey: string) {
+  tavilyConfig.value = await withStoredTavilyApiKey(tavilyConfig.value, apiKey, nativeBridge)
+  saveTavilyConfig(tavilyConfig.value)
+}
+
+async function clearTavilyApiKey() {
+  tavilyConfig.value = await clearStoredTavilyApiKey(tavilyConfig.value, nativeBridge)
+  saveTavilyConfig(tavilyConfig.value)
 }
 
 function closeSettings() {
@@ -1164,6 +1201,7 @@ function handleSwipeLeft() {
       :format-tool-args="formatToolArgs"
       :format-tool-output="formatToolOutput"
       @toggle-sidebar="sidebarOpen = !sidebarOpen"
+      @create-session="createSession"
       @open-settings="configOpen = true"
       @send-message="sendMessage"
       @stop-generation="stopGeneration"
@@ -1230,6 +1268,12 @@ function handleSwipeLeft() {
           </section>
 
           <TermuxEnvironmentCard />
+
+          <TavilySearchConfigCard
+            :configured="tavilyConfigured"
+            :save-api-key="saveTavilyApiKey"
+            :clear-api-key="clearTavilyApiKey"
+          />
 
           <ToolCatalogSection
             :tools="catalogTools"

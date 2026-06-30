@@ -1,5 +1,6 @@
 import { createBuiltinTools } from './builtinTools'
 import { createNativeTools } from './nativeTools'
+import { createSearchTools, type SearchToolsContext } from './searchTools'
 import { createTermuxTools } from './termuxTools'
 import { applyToolPolicy, type ToolPolicyConfig } from './toolPolicy'
 import { morunNativeBridge, type MorunNativeBridge } from '../native/morunNative'
@@ -14,6 +15,7 @@ export interface ToolRegistry {
 
 export interface ToolRegistryContext extends Pick<ToolExecutionContext, 'storage' | 'now'> {
   nativeBridge?: MorunNativeBridge
+  searchTools?: SearchToolsContext
 }
 
 const toolTitles: Record<string, string> = {
@@ -24,6 +26,7 @@ const toolTitles: Record<string, string> = {
   native_open_url: '打开链接',
   recall_notes: '检索记忆',
   remember_note: '保存记忆',
+  tavily_search: '联网检索',
   termux_clipboard: 'Termux 剪贴板',
   termux_call_log: 'Termux 通话记录',
   termux_contacts: 'Termux 联系人',
@@ -36,8 +39,9 @@ const toolTitles: Record<string, string> = {
 
 export function createToolRegistry(context: ToolRegistryContext = {}, policy?: ToolPolicyConfig): ToolRegistry {
   const nativeBridge = context.nativeBridge ?? morunNativeBridge
+  const searchTools = context.searchTools ? createSearchTools(context.searchTools) : []
   const { tools, catalogTools } = applyToolPolicy(
-    [...createBuiltinTools(context), ...createNativeTools(nativeBridge), ...createTermuxTools(nativeBridge)],
+    [...createBuiltinTools(context), ...createNativeTools(nativeBridge), ...searchTools, ...createTermuxTools(nativeBridge)],
     policy,
   )
   const toolsByName = new Map(catalogTools.map((tool) => [tool.name, tool]))

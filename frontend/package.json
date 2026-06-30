@@ -9,7 +9,8 @@
     "test": "vitest run",
     "preview": "vite preview",
     "cap:add:android": "cap add android",
-    "cap:sync": "npm run build && cap sync android",
+    "copy:vosk-assets": "node scripts/copy-vosk-assets.mjs",
+    "cap:sync": "npm run build && cap sync android && npm run copy:vosk-assets",
     "android:open": "cap open android"
   },
   "dependencies": {

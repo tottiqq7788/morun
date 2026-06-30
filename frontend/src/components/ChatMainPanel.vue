@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   Menu,
   MessageSquare,
+  Mic,
   Plus,
   Send,
   Settings,
@@ -36,6 +37,7 @@ import {
   normalizeMediaSource,
   type MediaAttachment,
 } from '../stores/media'
+import { formatVoiceDuration, voiceAudioSrc } from '../stores/voice'
 
 type MediaImportState = { status: 'pending' | 'error'; error?: string }
 
@@ -47,6 +49,8 @@ const props = defineProps<{
   activeModelValue: string
   modelAccounts: ModelAccount[]
   isGenerating: boolean
+  voiceInputState: 'idle' | 'recording' | 'transcribing'
+  voiceInputError: string
   draft: string
   formatTime: (value: number) => string
   renderMarkdown: (value: string, options?: MarkdownRenderOptions) => string
@@ -66,6 +70,9 @@ const emit = defineEmits<{
   openSettings: []
   sendMessage: []
   stopGeneration: []
+  startVoiceRecording: []
+  stopVoiceRecording: []
+  cancelVoiceRecording: []
   'rollback-turn': [payload: { userMessageId: string; content: string }]
   'update:draft': [value: string]
   'update:activeModelValue': [value: string]
@@ -81,6 +88,10 @@ const questionDialogMessage = ref<ChatMessage | null>(null)
 const modelPickerOpen = ref(false)
 const mediaPreview = ref<MediaAttachment | null>(null)
 const toolDialogMessage = ref<ChatMessage | null>(null)
+let sendPressTimer: number | undefined
+let sendPressActive = false
+let sendPressStartedVoice = false
+let suppressNextSendClick = false
 
 const turnPages = computed(() => groupChatTurnPages(props.activeSession?.messages ?? []))
 const lastPageIndex = computed(() => Math.max(turnPages.value.length - 1, 0))
@@ -93,6 +104,8 @@ const sessionMediaAttachments = computed(() => {
   return props.activeSession?.messages.flatMap((message) => message.mediaAttachments ?? []) ?? []
 })
 const mediaPreviewSrc = computed(() => (mediaPreview.value ? mediaAttachmentViewSrc(mediaPreview.value) : ''))
+const voiceDetailSrc = computed(() => (questionDialogMessage.value?.voice ? voiceAudioSrc(questionDialogMessage.value.voice) : ''))
+const isVoiceTranscribing = computed(() => props.voiceInputState === 'transcribing')
 
 const messageSignature = computed(() => {
   return (props.activeSession?.messages ?? [])
@@ -188,14 +201,62 @@ function goNextPage() {
 }
 
 function handleSendMessage() {
+  if (suppressNextSendClick) {
+    suppressNextSendClick = false
+    return
+  }
   followLatest.value = true
   shouldStickToBottom.value = true
   emit('sendMessage')
 }
 
+function handleSendPressStart(event: PointerEvent) {
+  if (props.isGenerating || isVoiceTranscribing.value || sendPressActive) return
+
+  sendPressActive = true
+  sendPressStartedVoice = false
+  window.clearTimeout(sendPressTimer)
+  ;(event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId)
+  sendPressTimer = window.setTimeout(() => {
+    if (!sendPressActive || props.isGenerating || isVoiceTranscribing.value) return
+    sendPressStartedVoice = true
+    suppressNextSendClick = true
+    emit('startVoiceRecording')
+  }, 260)
+}
+
+function handleSendPressEnd(event: PointerEvent) {
+  if (!sendPressActive) return
+
+  sendPressActive = false
+  window.clearTimeout(sendPressTimer)
+  ;(event.currentTarget as HTMLElement | null)?.releasePointerCapture?.(event.pointerId)
+  if (sendPressStartedVoice) {
+    event.preventDefault()
+    emit('stopVoiceRecording')
+  }
+}
+
+function handleSendPressCancel(event: PointerEvent) {
+  if (!sendPressActive) return
+
+  sendPressActive = false
+  window.clearTimeout(sendPressTimer)
+  ;(event.currentTarget as HTMLElement | null)?.releasePointerCapture?.(event.pointerId)
+  if (sendPressStartedVoice) {
+    suppressNextSendClick = true
+    emit('cancelVoiceRecording')
+  }
+}
+
 function openQuestionDialog(message: ChatMessage | null | undefined) {
   if (!message) return
   questionDialogMessage.value = message
+}
+
+function questionDisplayText(message: ChatMessage) {
+  if (message.voice) return `语音提问 · ${formatVoiceDuration(message.voice.durationMs)}`
+  return message.content
 }
 
 function handleRollbackTurn() {
@@ -378,8 +439,13 @@ defineExpose({
       >
         <Undo2 :size="16" />
       </button>
-      <button class="question-bubble pinned-question" type="button" @click="openQuestionDialog(currentPage.userMessage)">
-        {{ currentPage.userMessage.content }}
+      <button
+        :class="['question-bubble', 'pinned-question', { voice: currentPage.userMessage.voice }]"
+        type="button"
+        @click="openQuestionDialog(currentPage.userMessage)"
+      >
+        <Mic v-if="currentPage.userMessage.voice" :size="16" />
+        <span>{{ questionDisplayText(currentPage.userMessage) }}</span>
       </button>
     </div>
     <div v-else-if="currentPage" class="question-pin question-pin-muted">
@@ -416,6 +482,16 @@ defineExpose({
               </span>
               <span class="tool-status">{{ toolStatusSummary(message) }}</span>
             </div>
+          </button>
+          <button
+            v-else-if="message.role === 'user' && message.voice"
+            class="message-bubble voice-message-button"
+            type="button"
+            @click="openQuestionDialog(message)"
+          >
+            <Mic :size="17" />
+            <span>语音提问</span>
+            <small>{{ formatVoiceDuration(message.voice.durationMs) }}</small>
           </button>
           <div v-else class="message-bubble">
             <div
@@ -496,16 +572,23 @@ defineExpose({
           </button>
           <button
             v-else
-            class="primary-button composer-square-button"
+            :class="['primary-button', 'composer-square-button', { recording: voiceInputState === 'recording', transcribing: voiceInputState === 'transcribing' }]"
             type="button"
-            aria-label="发送"
-            title="发送"
-            :disabled="!draft.trim()"
+            :aria-label="voiceInputState === 'recording' ? '松开发送语音' : voiceInputState === 'transcribing' ? '正在识别语音' : '发送'"
+            :title="voiceInputState === 'recording' ? '松开发送语音' : voiceInputState === 'transcribing' ? '正在识别语音' : '发送'"
+            :disabled="voiceInputState === 'transcribing'"
+            @pointerdown="handleSendPressStart"
+            @pointerup="handleSendPressEnd"
+            @pointercancel="handleSendPressCancel"
+            @contextmenu.prevent
             @click="handleSendMessage"
           >
-            <Send :size="16" />
+            <LoaderCircle v-if="voiceInputState === 'transcribing'" :size="16" />
+            <Mic v-else-if="voiceInputState === 'recording'" :size="16" />
+            <Send v-else :size="16" />
           </button>
         </div>
+        <p v-if="voiceInputError" class="composer-voice-error">{{ voiceInputError }}</p>
       </div>
     </footer>
 
@@ -559,7 +642,19 @@ defineExpose({
             <X :size="18" />
           </button>
         </header>
-        <div class="question-dialog-content">
+        <div v-if="questionDialogMessage.voice" class="question-dialog-content voice-detail-content">
+          <audio class="voice-detail-player" controls :src="voiceDetailSrc" />
+          <div class="voice-detail-meta">
+            <span>{{ formatVoiceDuration(questionDialogMessage.voice.durationMs) }}</span>
+            <span>{{ questionDialogMessage.voice.recognitionElapsedMs }} ms</span>
+            <span>{{ Math.ceil(questionDialogMessage.voice.size / 1024) }} KB</span>
+          </div>
+          <div class="voice-detail-transcript">
+            <span>转换文字</span>
+            <p>{{ questionDialogMessage.voice.transcript }}</p>
+          </div>
+        </div>
+        <div v-else class="question-dialog-content">
           {{ questionDialogMessage.content }}
         </div>
       </div>

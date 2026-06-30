@@ -1,11 +1,17 @@
 package com.morun.app;
 
+import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.media.AudioFormat;
+import android.media.AudioRecord;
+import android.media.MediaRecorder;
 import android.net.Uri;
+import android.os.SystemClock;
 import android.util.Base64;
 import android.util.Log;
+import com.getcapacitor.PermissionState;
 import androidx.security.crypto.EncryptedSharedPreferences;
 import androidx.security.crypto.MasterKey;
 import com.getcapacitor.JSArray;
@@ -40,11 +46,18 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.json.JSONObject;
+import org.vosk.Model;
+import org.vosk.Recognizer;
+import org.vosk.android.StorageService;
 
 @CapacitorPlugin(
     name = "MorunNative",
-    permissions = { @Permission(alias = "termuxRunCommand", strings = { "com.termux.permission.RUN_COMMAND" }) }
+    permissions = {
+        @Permission(alias = "termuxRunCommand", strings = { "com.termux.permission.RUN_COMMAND" }),
+        @Permission(alias = "recordAudio", strings = { Manifest.permission.RECORD_AUDIO })
+    }
 )
 public class MorunNativePlugin extends Plugin {
 
@@ -58,12 +71,23 @@ public class MorunNativePlugin extends Plugin {
     private static final long DEBUG_LOG_MAX_FILE_BYTES = 5L * 1024L * 1024L;
     private static final int DEBUG_LOG_MAX_FILES = 10;
     private static final int DEBUG_LOG_DEFAULT_READ_BYTES = 1024 * 1024;
+    private static final String VOICE_DIR_NAME = "morun-voice";
+    private static final String VOICE_MIME_TYPE = "audio/wav";
+    private static final String VOSK_MODEL_ASSET = "model-zh-cn";
+    private static final String VOSK_MODEL_STORAGE_DIR = "vosk-models";
+    private static final int VOICE_SAMPLE_RATE = 16000;
+    private static final int VOICE_MIN_DURATION_MS = 500;
+    private static final int VOICE_MAX_DURATION_MS = 60000;
+    private static final int VOICE_RECOGNIZER_CHUNK_BYTES = 4096;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final Map<String, HttpURLConnection> activeConnections = new ConcurrentHashMap<>();
     private final Map<String, Future<?>> activeRequests = new ConcurrentHashMap<>();
+    private final Object voiceLock = new Object();
     private SharedPreferences securePreferences;
     private TermuxCommandBridge termuxCommandBridge;
+    private ActiveVoiceRecording activeVoiceRecording;
+    private volatile Model cachedVoskModel;
 
     @PluginMethod
     public void isAvailable(PluginCall call) {
@@ -183,6 +207,76 @@ public class MorunNativePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void startVoiceRecording(PluginCall call) {
+        String requestId = requireString(call, "requestId");
+        if (requestId == null) return;
+
+        if (getPermissionState("recordAudio") != PermissionState.GRANTED) {
+            requestPermissionForAlias("recordAudio", call, "recordAudioPermissionCallback");
+            return;
+        }
+
+        startVoiceRecordingWithPermission(call, requestId);
+    }
+
+    @PermissionCallback
+    private void recordAudioPermissionCallback(PluginCall call) {
+        String requestId = requireString(call, "requestId");
+        if (requestId == null) return;
+        if (getPermissionState("recordAudio") != PermissionState.GRANTED) {
+            call.reject("录音权限被拒绝。");
+            return;
+        }
+
+        startVoiceRecordingWithPermission(call, requestId);
+    }
+
+    @PluginMethod
+    public void stopVoiceRecording(PluginCall call) {
+        String requestId = requireString(call, "requestId");
+        if (requestId == null) return;
+
+        ActiveVoiceRecording recording;
+        synchronized (voiceLock) {
+            recording = activeVoiceRecording;
+            if (recording == null || !recording.requestId.equals(requestId)) {
+                call.reject("没有正在进行的语音录音。");
+                return;
+            }
+            activeVoiceRecording = null;
+            recording.requestStop();
+        }
+
+        ActiveVoiceRecording finalRecording = recording;
+        executor.submit(() -> {
+            try {
+                call.resolve(finishVoiceRecording(finalRecording));
+            } catch (Exception error) {
+                call.reject(error.getMessage() == null ? "语音识别失败。" : error.getMessage(), error);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void cancelVoiceRecording(PluginCall call) {
+        String requestId = requireString(call, "requestId");
+        if (requestId == null) return;
+
+        ActiveVoiceRecording recording = null;
+        synchronized (voiceLock) {
+            if (activeVoiceRecording != null && activeVoiceRecording.requestId.equals(requestId)) {
+                recording = activeVoiceRecording;
+                activeVoiceRecording = null;
+            }
+        }
+
+        if (recording != null) {
+            recording.requestStop();
+        }
+        resolveOk(call);
+    }
+
+    @PluginMethod
     public void appendDebugLog(PluginCall call) {
         String entry = requireString(call, "entry");
         if (entry == null) return;
@@ -268,6 +362,12 @@ public class MorunNativePlugin extends Plugin {
             cancelRequest(requestId);
         }
         activeRequests.clear();
+        synchronized (voiceLock) {
+            if (activeVoiceRecording != null) {
+                activeVoiceRecording.requestStop();
+                activeVoiceRecording = null;
+            }
+        }
         if (termuxCommandBridge != null) {
             termuxCommandBridge.destroy();
             termuxCommandBridge = null;
@@ -318,6 +418,236 @@ public class MorunNativePlugin extends Plugin {
         result.put("size", mediaBytes.bytes.length);
         result.put("createdAt", System.currentTimeMillis());
         return result;
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private void startVoiceRecordingWithPermission(PluginCall call, String requestId) {
+        synchronized (voiceLock) {
+            if (activeVoiceRecording != null) {
+                call.reject("已有录音正在进行。");
+                return;
+            }
+
+            int minBufferSize = AudioRecord.getMinBufferSize(
+                VOICE_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            );
+            if (minBufferSize <= 0) {
+                call.reject("无法初始化录音设备。");
+                return;
+            }
+
+            int bufferSize = Math.max(minBufferSize, VOICE_RECOGNIZER_CHUNK_BYTES);
+            AudioRecord audioRecord = new AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                VOICE_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            );
+            if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+                audioRecord.release();
+                call.reject("无法初始化录音设备。");
+                return;
+            }
+
+            try {
+                audioRecord.startRecording();
+            } catch (Exception error) {
+                audioRecord.release();
+                call.reject("无法开始录音。", error);
+                return;
+            }
+
+            ActiveVoiceRecording recording = new ActiveVoiceRecording(requestId, safeVoiceId(requestId), audioRecord);
+            recording.captureFuture = executor.submit(() -> captureVoice(recording, bufferSize));
+            activeVoiceRecording = recording;
+
+            JSObject result = new JSObject();
+            result.put("requestId", requestId);
+            result.put("startedAt", recording.createdAt);
+            call.resolve(result);
+        }
+    }
+
+    private void captureVoice(ActiveVoiceRecording recording, int bufferSize) {
+        byte[] buffer = new byte[bufferSize];
+        try {
+            while (!recording.stopRequested && !Thread.currentThread().isInterrupted()) {
+                if (recording.elapsedMs() >= VOICE_MAX_DURATION_MS) {
+                    recording.limited = true;
+                    break;
+                }
+
+                int read = recording.audioRecord.read(buffer, 0, buffer.length);
+                if (read > 0) {
+                    recording.write(buffer, read);
+                } else if (read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_BAD_VALUE) {
+                    break;
+                }
+            }
+        } finally {
+            try {
+                if (recording.audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
+                    recording.audioRecord.stop();
+                }
+            } catch (Exception ignored) {}
+            recording.audioRecord.release();
+        }
+    }
+
+    private JSObject finishVoiceRecording(ActiveVoiceRecording recording) throws Exception {
+        Future<?> future = recording.captureFuture;
+        if (future != null) {
+            try {
+                future.get(3, TimeUnit.SECONDS);
+            } catch (Exception error) {
+                future.cancel(true);
+            }
+        }
+
+        byte[] pcm = recording.pcmBytes();
+        long durationMs = durationMsForPcm(pcm);
+        if (durationMs < VOICE_MIN_DURATION_MS || pcm.length < VOICE_SAMPLE_RATE) {
+            throw new IllegalArgumentException("录音时间太短。");
+        }
+
+        File voiceDir = getVoiceDir();
+        if (!voiceDir.exists() && !voiceDir.mkdirs()) {
+            throw new IOException("无法创建语音文件目录。");
+        }
+
+        String fileName = recording.voiceId + ".wav";
+        File wavFile = new File(voiceDir, fileName);
+        writeVoiceWav(wavFile, pcm, VOICE_SAMPLE_RATE);
+
+        long recognitionStartedAt = SystemClock.elapsedRealtime();
+        VoiceRecognition recognition = recognizeVoicePcm(pcm);
+        long recognitionElapsedMs = Math.max(1, SystemClock.elapsedRealtime() - recognitionStartedAt);
+        String transcript = recognition.transcript.trim();
+        if (transcript.isEmpty()) {
+            throw new IllegalArgumentException("没有识别到语音内容。");
+        }
+
+        JSObject result = new JSObject();
+        result.put("requestId", recording.requestId);
+        result.put("voiceId", recording.voiceId);
+        result.put("localPath", wavFile.getAbsolutePath());
+        result.put("fileName", fileName);
+        result.put("mimeType", VOICE_MIME_TYPE);
+        result.put("size", wavFile.length());
+        result.put("durationMs", durationMs);
+        result.put("sampleRate", VOICE_SAMPLE_RATE);
+        result.put("transcript", transcript);
+        result.put("recognitionElapsedMs", recognitionElapsedMs);
+        result.put("createdAt", recording.createdAt);
+        result.put("limited", recording.limited);
+        result.put("segments", recognition.segments);
+        return result;
+    }
+
+    private VoiceRecognition recognizeVoicePcm(byte[] pcm) throws IOException {
+        JSArray segments = new JSArray();
+        StringBuilder transcript = new StringBuilder();
+
+        try (Recognizer recognizer = new Recognizer(getVoskModel(), VOICE_SAMPLE_RATE)) {
+            recognizer.setWords(false);
+            int offset = 0;
+            while (offset < pcm.length) {
+                int size = Math.min(VOICE_RECOGNIZER_CHUNK_BYTES, pcm.length - offset);
+                byte[] chunk = Arrays.copyOfRange(pcm, offset, offset + size);
+                if (recognizer.acceptWaveForm(chunk, chunk.length)) {
+                    appendVoiceSegment(segments, transcript, recognizer.getResult());
+                }
+                offset += size;
+            }
+            appendVoiceSegment(segments, transcript, recognizer.getFinalResult());
+        }
+
+        return new VoiceRecognition(transcript.toString().trim(), segments);
+    }
+
+    private synchronized Model getVoskModel() throws IOException {
+        if (cachedVoskModel != null) return cachedVoskModel;
+
+        try {
+            String modelPath = StorageService.sync(getContext(), VOSK_MODEL_ASSET, VOSK_MODEL_STORAGE_DIR);
+            cachedVoskModel = new Model(modelPath);
+            return cachedVoskModel;
+        } catch (IOException error) {
+            throw new IOException("Vosk 中文模型缺失或加载失败。请确认 APK 已打包 model-zh-cn 资产。", error);
+        }
+    }
+
+    private static void appendVoiceSegment(JSArray segments, StringBuilder transcript, String rawJson) {
+        String text = extractText(rawJson);
+        if (text.isEmpty()) return;
+
+        if (transcript.length() > 0) transcript.append(' ');
+        transcript.append(text);
+
+        JSObject segment = new JSObject();
+        segment.put("text", text);
+        segment.put("raw", rawJson);
+        segments.put(segment);
+    }
+
+    private static String extractText(String rawJson) {
+        try {
+            JSONObject json = new JSONObject(rawJson);
+            return json.optString("text", "").trim();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private static long durationMsForPcm(byte[] pcm) {
+        return Math.round((pcm.length / (VOICE_SAMPLE_RATE * 2.0)) * 1000.0);
+    }
+
+    private File getVoiceDir() {
+        return new File(getContext().getFilesDir(), VOICE_DIR_NAME);
+    }
+
+    private static String safeVoiceId(String requestId) {
+        String cleaned = requestId == null ? "" : requestId.trim();
+        if (cleaned.matches("voice_[A-Za-z0-9_-]{6,80}")) {
+            return cleaned;
+        }
+        return "voice_" + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static void writeVoiceWav(File file, byte[] pcm, int sampleRate) throws IOException {
+        int byteRate = sampleRate * 2;
+        try (FileOutputStream output = new FileOutputStream(file)) {
+            output.write(new byte[] { 'R', 'I', 'F', 'F' });
+            writeLittleEndianInt(output, 36 + pcm.length);
+            output.write(new byte[] { 'W', 'A', 'V', 'E' });
+            output.write(new byte[] { 'f', 'm', 't', ' ' });
+            writeLittleEndianInt(output, 16);
+            writeLittleEndianShort(output, 1);
+            writeLittleEndianShort(output, 1);
+            writeLittleEndianInt(output, sampleRate);
+            writeLittleEndianInt(output, byteRate);
+            writeLittleEndianShort(output, 2);
+            writeLittleEndianShort(output, 16);
+            output.write(new byte[] { 'd', 'a', 't', 'a' });
+            writeLittleEndianInt(output, pcm.length);
+            output.write(pcm);
+        }
+    }
+
+    private static void writeLittleEndianShort(FileOutputStream output, int value) throws IOException {
+        output.write(value & 0xff);
+        output.write((value >> 8) & 0xff);
+    }
+
+    private static void writeLittleEndianInt(FileOutputStream output, int value) throws IOException {
+        output.write(value & 0xff);
+        output.write((value >> 8) & 0xff);
+        output.write((value >> 16) & 0xff);
+        output.write((value >> 24) & 0xff);
     }
 
     private MediaBytes readMediaSource(String source) throws Exception {
@@ -862,6 +1192,57 @@ public class MorunNativePlugin extends Plugin {
         JSObject result = new JSObject();
         result.put("ok", true);
         call.resolve(result);
+    }
+
+    private static class ActiveVoiceRecording {
+        final String requestId;
+        final String voiceId;
+        final AudioRecord audioRecord;
+        final long startedAtElapsed;
+        final long createdAt;
+        final ByteArrayOutputStream pcm = new ByteArrayOutputStream();
+        volatile boolean stopRequested;
+        volatile boolean limited;
+        Future<?> captureFuture;
+
+        ActiveVoiceRecording(String requestId, String voiceId, AudioRecord audioRecord) {
+            this.requestId = requestId;
+            this.voiceId = voiceId;
+            this.audioRecord = audioRecord;
+            this.startedAtElapsed = SystemClock.elapsedRealtime();
+            this.createdAt = System.currentTimeMillis();
+        }
+
+        long elapsedMs() {
+            return SystemClock.elapsedRealtime() - startedAtElapsed;
+        }
+
+        synchronized void write(byte[] buffer, int length) {
+            pcm.write(buffer, 0, length);
+        }
+
+        synchronized byte[] pcmBytes() {
+            return pcm.toByteArray();
+        }
+
+        void requestStop() {
+            stopRequested = true;
+            try {
+                if (audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
+                    audioRecord.stop();
+                }
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private static class VoiceRecognition {
+        final String transcript;
+        final JSArray segments;
+
+        VoiceRecognition(String transcript, JSArray segments) {
+            this.transcript = transcript;
+            this.segments = segments;
+        }
     }
 
     private static class MediaBytes {

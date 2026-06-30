@@ -25,7 +25,7 @@ import type {
   ToolConfirmationPolicy,
   ToolDefinition,
 } from './agent/types'
-import { morunNativeBridge } from './native/morunNative'
+import { morunNativeBridge, type VoiceRecognitionResult } from './native/morunNative'
 import {
   accountDisplayName,
   accountModels,
@@ -78,6 +78,7 @@ import {
 } from './stores/debugLog'
 import { extractProviderErrorMessage, getFriendlyRequestErrorMessage } from './stores/requestErrors'
 import { rollbackChatTurnToDraft } from './stores/chatTurns'
+import { normalizeVoiceAttachment, type VoiceAttachment } from './stores/voice'
 import {
   buildSessionTitleMessages,
   countConversationTurns,
@@ -126,6 +127,14 @@ interface StreamDebugState {
   lastLoggedLength: number
 }
 
+type VoiceInputState = 'idle' | 'recording' | 'transcribing'
+
+interface SubmitMessageOptions {
+  clearDraft?: boolean
+  inputKind?: 'text' | 'voice'
+  voice?: VoiceAttachment
+}
+
 const chatStore = useChatStore()
 const {
   modelConfig,
@@ -162,6 +171,11 @@ const toolRegistry = computed(() =>
 const agentTools = computed(() => toolRegistry.value.tools)
 const catalogTools = computed(() => toolRegistry.value.catalogTools)
 const draft = ref('')
+const voiceInputState = ref<VoiceInputState>('idle')
+const voiceInputError = ref('')
+const activeVoiceRequestId = ref('')
+let voiceStartPromise: Promise<void> | null = null
+let pendingVoiceStopRequestId = ''
 const configOpen = ref(false)
 const sidebarOpen = ref(false)
 const accountDialogOpen = ref(false)
@@ -540,25 +554,28 @@ async function saveAccountDraft() {
 }
 
 async function sendMessage() {
-  const content = draft.value.trim()
+  await submitMessage(draft.value.trim(), { clearDraft: true, inputKind: 'text' })
+}
+
+async function submitMessage(content: string, options: SubmitMessageOptions = {}) {
   const session = activeSession.value
-  if (!content || !session || isGenerating.value) return
+  if (!content || !session || isGenerating.value) return false
 
   const account = activeModelAccount.value
   const provider = selectedProvider.value
   if (!account || !provider || !provider.baseUrl.trim() || !account.model.trim()) {
     configOpen.value = true
-    return
+    return false
   }
 
   const apiKey = await resolveModelAccountApiKey(account, nativeBridge)
 
   if (provider.requiresApiKey && !apiKey.trim()) {
     configOpen.value = true
-    return
+    return false
   }
 
-  const userMessage = createUserMessage(content)
+  const userMessage = createUserMessage(content, { voice: options.voice })
   let assistantMessage = createAssistantMessage()
   assistantMessage.createdAt = userMessage.createdAt + 1
 
@@ -568,8 +585,10 @@ async function sendMessage() {
 
   session.messages.push(userMessage, assistantMessage)
   session.updatedAt = Date.now()
-  draft.value = ''
-  adjustComposerHeight()
+  if (options.clearDraft !== false) {
+    draft.value = ''
+    adjustComposerHeight()
+  }
   isGenerating.value = true
   scheduleScroll()
 
@@ -587,8 +606,35 @@ async function sendMessage() {
       stream: modelConfig.value.stream,
       toolCount: agentTools.value.length,
       tools: agentTools.value.map((tool) => tool.name),
+      inputKind: options.inputKind ?? 'text',
+      voice: options.voice
+        ? {
+            voiceId: options.voice.voiceId,
+            durationMs: options.voice.durationMs,
+            recognitionElapsedMs: options.voice.recognitionElapsedMs,
+            size: options.voice.size,
+            limited: options.voice.limited === true,
+          }
+        : undefined,
     },
   })
+
+  if (options.voice) {
+    logDebug({
+      category: 'chat',
+      event: 'voice_message_submitted',
+      sessionId: session.id,
+      messageId: userMessage.id,
+      data: {
+        content,
+        voiceId: options.voice.voiceId,
+        durationMs: options.voice.durationMs,
+        recognitionElapsedMs: options.voice.recognitionElapsedMs,
+        size: options.voice.size,
+        limited: options.voice.limited === true,
+      },
+    })
+  }
 
   const controller = new AbortController()
   activeAbortController.value = controller
@@ -676,6 +722,149 @@ async function sendMessage() {
     pendingToolConfirmation.value = null
     scheduleScroll()
     if (configOpen.value) void refreshDebugLogInfo()
+  }
+
+  return true
+}
+
+async function startVoiceRecording() {
+  if (isGenerating.value || voiceInputState.value !== 'idle') return
+
+  const requestId = createId('voice')
+  activeVoiceRequestId.value = requestId
+  voiceInputState.value = 'recording'
+  voiceInputError.value = ''
+  pendingVoiceStopRequestId = ''
+  logDebug({
+    category: 'chat',
+    event: 'voice_record_started',
+    sessionId: activeSession.value?.id,
+    data: { requestId },
+  })
+
+  const startPromise = nativeBridge.startVoiceRecording(requestId).then(() => undefined)
+  voiceStartPromise = startPromise
+  try {
+    await startPromise
+    if (voiceStartPromise === startPromise) voiceStartPromise = null
+    if (activeVoiceRequestId.value !== requestId) {
+      await nativeBridge.cancelVoiceRecording(requestId)
+      return
+    }
+    if (pendingVoiceStopRequestId === requestId) {
+      pendingVoiceStopRequestId = ''
+      await stopVoiceRecording()
+    }
+  } catch (error) {
+    if (voiceStartPromise === startPromise) voiceStartPromise = null
+    pendingVoiceStopRequestId = ''
+    activeVoiceRequestId.value = ''
+    voiceInputState.value = 'idle'
+    voiceInputError.value = formatVoiceInputError(error)
+    logDebug({
+      level: 'error',
+      category: 'chat',
+      event: 'voice_transcription_failed',
+      sessionId: activeSession.value?.id,
+      data: {
+        requestId,
+        error: voiceInputError.value,
+        rawError: error instanceof Error ? error.message : String(error),
+      },
+    })
+  }
+}
+
+async function stopVoiceRecording() {
+  const requestId = activeVoiceRequestId.value
+  if (!requestId || (voiceInputState.value !== 'recording' && voiceInputState.value !== 'transcribing')) return
+
+  if (voiceStartPromise) {
+    pendingVoiceStopRequestId = requestId
+    voiceInputState.value = 'transcribing'
+    return
+  }
+
+  voiceInputState.value = 'transcribing'
+  voiceInputError.value = ''
+  try {
+    const result = await nativeBridge.stopVoiceRecording(requestId)
+    const voice = voiceAttachmentFromResult(result)
+    const transcript = voice.transcript.trim()
+    if (!transcript) throw new Error('没有识别到语音内容。')
+
+    logDebug({
+      category: 'chat',
+      event: 'voice_record_completed',
+      sessionId: activeSession.value?.id,
+      data: voiceDebugData(result, voice),
+    })
+    logDebug({
+      category: 'chat',
+      event: 'voice_transcribed',
+      sessionId: activeSession.value?.id,
+      data: {
+        ...voiceDebugData(result, voice),
+        transcript,
+      },
+    })
+
+    activeVoiceRequestId.value = ''
+    voiceInputState.value = 'idle'
+    const submitted = await submitMessage(transcript, {
+      clearDraft: false,
+      inputKind: 'voice',
+      voice,
+    })
+    if (!submitted) {
+      draft.value = transcript
+      adjustComposerHeight()
+      voiceInputError.value = '语音已转成文字，请完成配置后发送。'
+    }
+  } catch (error) {
+    voiceInputError.value = formatVoiceInputError(error)
+    logDebug({
+      level: 'error',
+      category: 'chat',
+      event: 'voice_transcription_failed',
+      sessionId: activeSession.value?.id,
+      data: {
+        requestId,
+        error: voiceInputError.value,
+        rawError: error instanceof Error ? error.message : String(error),
+      },
+    })
+  } finally {
+    activeVoiceRequestId.value = ''
+    voiceInputState.value = 'idle'
+  }
+}
+
+async function cancelVoiceRecording() {
+  const requestId = activeVoiceRequestId.value
+  activeVoiceRequestId.value = ''
+  pendingVoiceStopRequestId = ''
+  voiceInputState.value = 'idle'
+  if (!requestId) return
+
+  await nativeBridge.cancelVoiceRecording(requestId)
+}
+
+function voiceAttachmentFromResult(result: VoiceRecognitionResult): VoiceAttachment {
+  const voice = normalizeVoiceAttachment(result)
+  if (!voice) throw new Error('语音识别结果格式无效。')
+  return voice
+}
+
+function voiceDebugData(result: VoiceRecognitionResult, voice: VoiceAttachment) {
+  return {
+    requestId: result.requestId,
+    voiceId: voice.voiceId,
+    durationMs: voice.durationMs,
+    recognitionElapsedMs: voice.recognitionElapsedMs,
+    size: voice.size,
+    sampleRate: voice.sampleRate,
+    limited: voice.limited === true,
   }
 }
 
@@ -1264,6 +1453,11 @@ function formatRequestError(error: unknown) {
   return `请求失败：${shortenError(extractProviderErrorMessage(message) ?? message)}`
 }
 
+function formatVoiceInputError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '语音输入失败。')
+  return shortenError(message || '语音输入失败。')
+}
+
 function shortenError(message: string) {
   return message.replace(/\s+/g, ' ').slice(0, 180)
 }
@@ -1579,6 +1773,8 @@ function handleSwipeLeft() {
       :active-model-initial="activeModelInitial"
       :model-accounts="modelConfig.accounts"
       :is-generating="isGenerating"
+      :voice-input-state="voiceInputState"
+      :voice-input-error="voiceInputError"
       :format-time="formatTime"
       :render-markdown="renderMarkdown"
       :media-import-states="mediaImportStates"
@@ -1594,6 +1790,9 @@ function handleSwipeLeft() {
       @open-settings="configOpen = true"
       @send-message="sendMessage"
       @stop-generation="stopGeneration"
+      @start-voice-recording="startVoiceRecording"
+      @stop-voice-recording="stopVoiceRecording"
+      @cancel-voice-recording="cancelVoiceRecording"
       @rollback-turn="rollbackTurnToDraft"
     />
 

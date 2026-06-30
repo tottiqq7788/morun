@@ -213,6 +213,71 @@ describe('chat store persistence', () => {
     })
   })
 
+  it('normalizes stored voice attachments for user messages', () => {
+    const storage = createMemoryStorage({
+      [sessionsKey]: JSON.stringify([
+        {
+          id: 'session_voice',
+          title: 'Voice',
+          createdAt: 1,
+          updatedAt: 2,
+          messages: [
+            {
+              id: 'message_voice',
+              role: 'user',
+              content: '今天天气怎么样',
+              createdAt: 3,
+              status: 'complete',
+              voice: {
+                voiceId: 'voice_test123',
+                localPath: '/data/user/0/com.morun.app/files/morun-voice/voice_test123.wav',
+                fileName: 'voice_test123.wav',
+                mimeType: 'audio/wav',
+                size: 1024,
+                durationMs: 1800,
+                sampleRate: 16000,
+                transcript: '今天天气怎么样',
+                recognitionElapsedMs: 220,
+                createdAt: 3,
+                segments: [{ text: '今天天气怎么样', raw: '{"text":"今天天气怎么样"}' }],
+              },
+            },
+            {
+              id: 'message_bad_voice',
+              role: 'user',
+              content: 'bad',
+              createdAt: 4,
+              status: 'complete',
+              voice: {
+                voiceId: 'bad',
+                localPath: '/tmp/voice.wav',
+                fileName: 'bad.wav',
+                mimeType: 'audio/mpeg',
+                size: 1024,
+                durationMs: 1800,
+                sampleRate: 16000,
+                transcript: 'bad',
+                recognitionElapsedMs: 220,
+              },
+            },
+          ],
+        },
+      ]),
+    })
+
+    const [session] = loadSessions(storage)
+
+    expect(session.messages[0].voice).toMatchObject({
+      voiceId: 'voice_test123',
+      mimeType: 'audio/wav',
+      transcript: '今天天气怎么样',
+      durationMs: 1800,
+      recognitionElapsedMs: 220,
+    })
+    expect(session.messages[0].voice?.segments).toEqual([{ text: '今天天气怎么样', raw: '{"text":"今天天气怎么样"}' }])
+    expect(session.messages[1].voice).toBeUndefined()
+  })
+
   it('settles interrupted in-flight messages when loading persisted sessions', () => {
     const storage = createMemoryStorage({
       [sessionsKey]: JSON.stringify([
@@ -417,6 +482,37 @@ describe('agent message context', () => {
       content: '我已经开启了权限，你再试试',
     })
     expect(messages.some((message) => message.role === 'tool')).toBe(false)
+  })
+
+  it('sends only the voice transcript text to the agent model', () => {
+    const session = createSession([
+      createMessage({
+        id: 'u1',
+        role: 'user',
+        content: '明天提醒我买牛奶',
+        createdAt: 1,
+        voice: {
+          voiceId: 'voice_test123',
+          localPath: '/data/user/0/com.morun.app/files/morun-voice/voice_test123.wav',
+          fileName: 'voice_test123.wav',
+          mimeType: 'audio/wav',
+          size: 1200,
+          durationMs: 2100,
+          sampleRate: 16000,
+          transcript: '明天提醒我买牛奶',
+          recognitionElapsedMs: 300,
+          createdAt: 1,
+        },
+      }),
+      createMessage({ id: 'a1', role: 'assistant', content: '', createdAt: 2, status: 'streaming' }),
+    ])
+
+    const messages = buildAgentMessages(session, 'a1', '')
+
+    expect(messages.at(-1)).toEqual({
+      role: 'user',
+      content: '明天提醒我买牛奶',
+    })
   })
 
   it('marks history as explainable when the current user only asks why it failed', () => {

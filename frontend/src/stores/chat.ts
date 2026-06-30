@@ -1,6 +1,7 @@
 import { computed, ref, watch } from 'vue'
 import type { AgentMessage, StorageLike } from '../agent/types'
 import { normalizeMediaAttachments, type MediaAttachment } from './media'
+import { normalizeVoiceAttachment, type VoiceAttachment } from './voice'
 
 export type Role = 'user' | 'assistant' | 'tool'
 export type MessageStatus = 'complete' | 'streaming' | 'error'
@@ -21,6 +22,7 @@ export interface ChatMessage {
   toolDuration?: number
   toolError?: string
   mediaAttachments?: MediaAttachment[]
+  voice?: VoiceAttachment
 }
 
 export interface ChatSession {
@@ -461,6 +463,8 @@ function normalizeMessages(value: unknown): ChatMessage[] {
       if (asFiniteNumber(raw.toolDuration) !== undefined) message.toolDuration = asFiniteNumber(raw.toolDuration)
       const mediaAttachments = normalizeMediaAttachments(raw.mediaAttachments)
       if (mediaAttachments.length) message.mediaAttachments = mediaAttachments
+      const voice = normalizeVoiceAttachment(raw.voice)
+      if (voice && message.role === 'user') message.voice = voice
       if (typeof raw.toolError === 'string') message.toolError = raw.toolError
       else if (wasRunningTool) message.toolError = '工具执行已中断。'
       if (wasRunningTool && !message.content) message.content = message.toolError ?? '工具执行已中断。'
@@ -603,13 +607,14 @@ export function createSessionModel(): ChatSession {
   }
 }
 
-export function createUserMessage(content: string): ChatMessage {
+export function createUserMessage(content: string, options: { voice?: VoiceAttachment } = {}): ChatMessage {
   return {
     id: createId('message'),
     role: 'user',
     content,
     createdAt: Date.now(),
     status: 'complete',
+    ...(options.voice ? { voice: options.voice } : {}),
   }
 }
 

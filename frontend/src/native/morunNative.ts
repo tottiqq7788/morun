@@ -72,6 +72,32 @@ export interface ImportMediaResult {
   createdAt: number
 }
 
+export interface NativeVoiceSegment {
+  text: string
+  raw?: string
+}
+
+export interface VoiceRecordingStartResult {
+  requestId: string
+  startedAt: number
+}
+
+export interface VoiceRecognitionResult {
+  requestId: string
+  voiceId: string
+  localPath: string
+  fileName: string
+  mimeType: 'audio/wav'
+  size: number
+  durationMs: number
+  sampleRate: number
+  transcript: string
+  recognitionElapsedMs: number
+  createdAt: number
+  limited?: boolean
+  segments: NativeVoiceSegment[]
+}
+
 export interface NativeDebugLogFileInfo {
   name: string
   size: number
@@ -99,6 +125,9 @@ export interface MorunNativePlugin {
   openTermuxApp(): Promise<{ ok: true }>
   runTermuxCommand(options: TermuxCommandRequest): Promise<TermuxCommandResult>
   importMedia(options: ImportMediaRequest): Promise<ImportMediaResult>
+  startVoiceRecording(options: { requestId: string }): Promise<VoiceRecordingStartResult>
+  stopVoiceRecording(options: { requestId: string }): Promise<VoiceRecognitionResult>
+  cancelVoiceRecording(options: { requestId: string }): Promise<{ ok: true }>
   appendDebugLog(options: { entry: string }): Promise<{ ok: true }>
   getDebugLogInfo(): Promise<NativeDebugLogInfo>
   readDebugLogs(options?: { maxBytes?: number }): Promise<{ content: string }>
@@ -133,6 +162,9 @@ export interface MorunNativeBridge {
   openTermuxApp(): Promise<boolean>
   runTermuxCommand(options: TermuxCommandRequest): Promise<TermuxCommandResult>
   importMedia(options: ImportMediaRequest): Promise<ImportMediaResult>
+  startVoiceRecording(requestId: string): Promise<VoiceRecordingStartResult>
+  stopVoiceRecording(requestId: string): Promise<VoiceRecognitionResult>
+  cancelVoiceRecording(requestId: string): Promise<boolean>
   appendDebugLog?(entry: string): Promise<boolean>
   getDebugLogInfo?(): Promise<NativeDebugLogInfo | null>
   readDebugLogs?(maxBytes?: number): Promise<string>
@@ -276,6 +308,30 @@ export function createMorunNativeBridge(
       }
 
       return plugin.importMedia(options)
+    },
+    async startVoiceRecording(requestId) {
+      if (!(await platformInfo())) {
+        throw new Error('语音输入需要在 Android 应用中使用。')
+      }
+
+      return plugin.startVoiceRecording({ requestId })
+    },
+    async stopVoiceRecording(requestId) {
+      if (!(await platformInfo())) {
+        throw new Error('语音输入需要在 Android 应用中使用。')
+      }
+
+      return plugin.stopVoiceRecording({ requestId })
+    },
+    async cancelVoiceRecording(requestId) {
+      if (!(await platformInfo())) return false
+
+      try {
+        await plugin.cancelVoiceRecording({ requestId })
+        return true
+      } catch {
+        return false
+      }
     },
     async appendDebugLog(entry) {
       if (!(await platformInfo())) return false

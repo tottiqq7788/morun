@@ -127,6 +127,7 @@ async function executeTavilySearch(
       }),
     })
   } catch (error) {
+    if (isAbortError(error)) throw error
     throw new Error(`Tavily 检索请求失败：${formatErrorMessage(error)}`)
   }
 
@@ -230,6 +231,10 @@ function extractErrorDetail(value: string) {
 
 function formatErrorMessage(error: unknown) {
   return error instanceof Error ? truncate(error.message, 180) : truncate(String(error), 180)
+}
+
+function isAbortError(error: unknown) {
+  return Boolean(error && typeof error === 'object' && 'name' in error && error.name === 'AbortError')
 }
 
 function truncate(value: string, maxLength: number) {

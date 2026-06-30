@@ -128,4 +128,16 @@ describe('tavily_search tool', () => {
     })[0]
     await expect(networkTool.execute({ query: 'OpenAI' }, {})).rejects.toThrow('network down')
   })
+
+  it('preserves abort errors so generation can stop cleanly', async () => {
+    const abortError = new DOMException('Aborted', 'AbortError')
+    const [tool] = createSearchTools({
+      resolveApiKey: async () => 'test-key',
+      fetchImpl: async () => {
+        throw abortError
+      },
+    })
+
+    await expect(tool.execute({ query: 'OpenAI' }, {})).rejects.toBe(abortError)
+  })
 })

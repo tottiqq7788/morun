@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { KeyRound, Save, Search, Trash2, X } from '@lucide/vue'
+import { Save, Search, Trash2, X } from '@lucide/vue'
 
 type OperationState = 'idle' | 'saving' | 'clearing' | 'success' | 'error'
 
@@ -72,26 +72,18 @@ function readableError(error: unknown, fallback: string) {
 </script>
 
 <template>
-  <section class="settings-section">
-    <div class="section-heading">
-      <h3>Tavily 联网检索</h3>
-      <span>{{ configured ? '已配置' : '未配置' }}</span>
-    </div>
-
-    <div class="tavily-config-card">
-      <span class="tavily-icon" aria-hidden="true">
+  <div class="tavily-config-entry">
+    <button class="tavily-config-card" type="button" @click="openDialog">
+      <span class="third-party-config-icon" aria-hidden="true">
         <Search :size="18" />
       </span>
-      <span class="tavily-main">
+      <span class="third-party-config-main">
         <strong>联网检索</strong>
         <small>Tavily Search 可为模型提供实时信息和来源链接。</small>
+        <span>{{ configured ? 'Tavily Search 已可用，模型可在需要实时信息时联网检索。' : '需要配置 Tavily API Key 后才能使用。' }}</span>
       </span>
       <span :class="['tavily-state-pill', { ready: configured }]">{{ configured ? '已就绪' : '待配置' }}</span>
-      <button class="secondary-button compact" type="button" @click="openDialog">
-        <KeyRound :size="15" />
-        配置
-      </button>
-    </div>
+    </button>
 
     <section v-if="dialogOpen" class="tavily-dialog-layer" aria-label="配置 Tavily 联网检索" @click.self="closeDialog">
       <div class="tavily-dialog">
@@ -140,23 +132,37 @@ function readableError(error: unknown, fallback: string) {
         </footer>
       </div>
     </section>
-  </section>
+  </div>
 </template>
 
 <style scoped>
+.tavily-config-entry {
+  display: grid;
+  gap: 8px;
+}
+
 .tavily-config-card {
   align-items: center;
   background: rgba(255, 253, 249, 0.72);
   border: 1px solid var(--line);
   border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
   display: grid;
   gap: 10px;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  min-height: 64px;
-  padding: 10px 11px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 74px;
+  padding: 11px;
+  text-align: left;
+  width: 100%;
 }
 
-.tavily-icon {
+.tavily-config-card:hover {
+  background: #fffdf9;
+  border-color: #cdbca9;
+}
+
+.third-party-config-icon {
   align-items: center;
   background: var(--panel-deep);
   border: 1px solid rgba(125, 115, 104, 0.18);
@@ -168,28 +174,36 @@ function readableError(error: unknown, fallback: string) {
   width: 36px;
 }
 
-.tavily-main {
+.third-party-config-main {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
-.tavily-main strong,
-.tavily-main small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tavily-main strong {
+.third-party-config-main strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 850;
 }
 
-.tavily-main small {
+.third-party-config-main small,
+.third-party-config-main span {
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.45;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.third-party-config-main small {
+  white-space: nowrap;
+}
+
+.third-party-config-main span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .tavily-state-pill {
@@ -281,12 +295,11 @@ function readableError(error: unknown, fallback: string) {
 
 @media (max-width: 560px) {
   .tavily-config-card {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
   }
 
-  .tavily-state-pill,
-  .tavily-config-card > button {
-    grid-column: 2;
+  .tavily-state-pill {
+    grid-column: 3;
     justify-self: start;
   }
 

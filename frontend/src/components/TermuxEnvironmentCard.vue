@@ -10,6 +10,11 @@ interface Diagnostic {
 }
 
 const nativeBridge = morunNativeBridge
+const props = withDefaults(defineProps<{
+  configCount?: number
+}>(), {
+  configCount: 1,
+})
 const termuxStatus = ref<TermuxStatus | null>(null)
 const diagnostic = ref<Diagnostic>({
   state: 'idle',
@@ -158,18 +163,22 @@ function stepTone(step: number) {
   <section class="settings-section">
     <div class="section-heading">
       <h3>第三方工具配置</h3>
-      <span>1 个配置</span>
+      <span>{{ props.configCount }} 个配置</span>
     </div>
 
     <button class="third-party-config-card" type="button" @click="termuxDialogOpen = true">
+      <span class="third-party-config-icon" aria-hidden="true">
+        <Terminal :size="18" />
+      </span>
       <span class="third-party-config-main">
         <strong>Termux</strong>
         <small>Termux:API 手机能力连接</small>
         <span>{{ statusDescription() }}</span>
       </span>
       <span :class="['termux-status-pill', statusTone()]">{{ statusLabel() }}</span>
-      <span class="config-action">配置</span>
     </button>
+
+    <slot />
 
     <section v-if="termuxDialogOpen" class="termux-config-dialog-layer" aria-label="Termux 配置" @click.self="termuxDialogOpen = false">
       <div class="termux-config-dialog">
@@ -285,7 +294,7 @@ function stepTone(step: number) {
   cursor: pointer;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   min-height: 74px;
   padding: 11px;
   text-align: left;
@@ -295,6 +304,18 @@ function stepTone(step: number) {
 .third-party-config-card:hover {
   background: #fffdf9;
   border-color: #cdbca9;
+}
+
+.third-party-config-icon {
+  align-items: center;
+  background: var(--panel-deep);
+  border: 1px solid rgba(125, 115, 104, 0.18);
+  border-radius: 8px;
+  color: var(--accent-strong);
+  display: inline-flex;
+  height: 36px;
+  justify-content: center;
+  width: 36px;
 }
 
 .third-party-config-main {
@@ -326,12 +347,6 @@ function stepTone(step: number) {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-}
-
-.config-action {
-  color: var(--accent-strong);
-  font-size: 12px;
-  font-weight: 850;
 }
 
 .termux-status-pill {
@@ -525,13 +540,4 @@ function stepTone(step: number) {
   padding: 9px;
 }
 
-@media (max-width: 720px) {
-  .third-party-config-card {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .config-action {
-    grid-column: 2;
-  }
-}
 </style>

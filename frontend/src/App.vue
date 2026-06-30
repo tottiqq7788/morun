@@ -1267,13 +1267,13 @@ function handleSwipeLeft() {
             <p v-else class="empty-copy">还没有模型配置。添加后可以在对话顶部切换厂商和模型。</p>
           </section>
 
-          <TermuxEnvironmentCard />
-
-          <TavilySearchConfigCard
-            :configured="tavilyConfigured"
-            :save-api-key="saveTavilyApiKey"
-            :clear-api-key="clearTavilyApiKey"
-          />
+          <TermuxEnvironmentCard :config-count="2">
+            <TavilySearchConfigCard
+              :configured="tavilyConfigured"
+              :save-api-key="saveTavilyApiKey"
+              :clear-api-key="clearTavilyApiKey"
+            />
+          </TermuxEnvironmentCard>
 
           <ToolCatalogSection
             :tools="catalogTools"

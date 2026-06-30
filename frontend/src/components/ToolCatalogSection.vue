@@ -175,7 +175,6 @@ function toolConfirmationPolicyLabel(policy: ToolConfirmationPolicy) {
           <small>{{ group.description }}</small>
           <span>{{ groupSummary(group.tools) }}</span>
         </span>
-        <span class="tool-summary-action">查看</span>
       </button>
     </div>
 
@@ -255,7 +254,7 @@ function toolConfirmationPolicyLabel(policy: ToolConfirmationPolicy) {
   cursor: pointer;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   min-height: 62px;
   padding: 10px 11px;
   text-align: left;
@@ -291,12 +290,6 @@ function toolConfirmationPolicyLabel(policy: ToolConfirmationPolicy) {
 .tool-group-main span {
   color: var(--muted);
   font-size: 12px;
-}
-
-.tool-summary-action {
-  color: var(--accent-strong);
-  font-size: 12px;
-  font-weight: 850;
 }
 
 .tool-catalog-dialog-layer {

@@ -1222,8 +1222,10 @@ h3 {
 .model-account-delete {
   background: var(--warn-soft);
   border: 1px solid rgba(159, 63, 47, 0.18);
-  height: 40px;
-  width: 40px;
+  min-height: 40px;
+  min-width: 36px;
+  padding-inline: 9px;
+  width: 36px;
 }
 
 .model-account-delete:hover {

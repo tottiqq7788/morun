@@ -3,10 +3,13 @@ import type { StorageLike } from '../agent/types'
 import {
   legacyConfigKey,
   legacySessionsKey,
+  buildAgentMessages,
   loadConfig,
   loadSessions,
   sessionsKey,
   useChatStore,
+  type ChatMessage,
+  type ChatSession,
 } from './chat'
 
 describe('chat store persistence', () => {
@@ -320,6 +323,117 @@ describe('chat store persistence', () => {
   })
 })
 
+describe('agent message context', () => {
+  it('strongly annotates historical turns and keeps the latest user message current', () => {
+    const session = createSession([
+      createMessage({
+        id: 'u1',
+        role: 'user',
+        content: '我现在在哪里？',
+        createdAt: 1,
+      }),
+      createMessage({
+        id: 't1',
+        role: 'tool',
+        content: 'Termux 命令超时：termux-location -p network',
+        createdAt: 2,
+        status: 'error',
+        toolName: 'termux_location',
+        toolArgs: { action: 'get', provider: 'network' },
+        toolStatus: 'error',
+        toolDuration: 31,
+        toolError: 'Termux 命令超时：termux-location -p network',
+      }),
+      createMessage({
+        id: 'a1',
+        role: 'assistant',
+        content: '三种定位都超时，暂时无法获取你的位置。',
+        createdAt: 3,
+      }),
+      createMessage({
+        id: 'u2',
+        role: 'user',
+        content: '我已经开启了权限，你再试试',
+        createdAt: 4,
+      }),
+      createMessage({
+        id: 'a2',
+        role: 'assistant',
+        content: '',
+        createdAt: 5,
+        status: 'streaming',
+      }),
+    ])
+
+    const messages = buildAgentMessages(session, 'a2', '你是手机助手。')
+    const history = messages.find((message) => message.role === 'system' && message.content.includes('历史对话索引'))
+
+    expect(messages.map((message) => message.role)).toEqual(['system', 'system', 'user'])
+    expect(history?.content).toContain('第 1 轮（历史记录，仅代表当时状态')
+    expect(history?.content).toContain('用户问题：我现在在哪里？')
+    expect(history?.content).toContain('工具调用：termux_location')
+    expect(history?.content).toContain('工具参数：{"action":"get","provider":"network"}')
+    expect(history?.content).toContain('工具状态：失败')
+    expect(history?.content).toContain('工具错误（当时失败）：Termux 命令超时')
+    expect(history?.content).toContain('助手回复：三种定位都超时')
+    expect(history?.content).not.toContain('我已经开启了权限')
+    expect(messages.at(-1)).toEqual({
+      role: 'user',
+      content: '我已经开启了权限，你再试试',
+    })
+    expect(messages.some((message) => message.role === 'tool')).toBe(false)
+  })
+
+  it('marks history as explainable when the current user only asks why it failed', () => {
+    const session = createSession([
+      createMessage({ id: 'u1', role: 'user', content: '定位一下', createdAt: 1 }),
+      createMessage({
+        id: 't1',
+        role: 'tool',
+        content: 'Termux 命令超时',
+        createdAt: 2,
+        status: 'error',
+        toolName: 'termux_location',
+        toolStatus: 'error',
+        toolError: 'Termux 命令超时',
+      }),
+      createMessage({ id: 'a1', role: 'assistant', content: '定位失败。', createdAt: 3 }),
+      createMessage({ id: 'u2', role: 'user', content: '刚才为什么失败？', createdAt: 4 }),
+      createMessage({ id: 'a2', role: 'assistant', content: '', createdAt: 5, status: 'streaming' }),
+    ])
+
+    const history = buildAgentMessages(session, 'a2', '').find((message) => message.role === 'system')?.content ?? ''
+
+    expect(history).toContain('如果用户只是询问历史原因，可以基于历史记录解释')
+    expect(history).toContain('工具错误（当时失败）：Termux 命令超时')
+  })
+
+  it('truncates long tool results in the historical index', () => {
+    const session = createSession([
+      createMessage({ id: 'u1', role: 'user', content: '查资料', createdAt: 1 }),
+      createMessage({
+        id: 't1',
+        role: 'tool',
+        content: '',
+        createdAt: 2,
+        toolName: 'tavily_search',
+        toolStatus: 'done',
+        toolResult: {
+          answer: `${'长结果'.repeat(700)}结尾`,
+        },
+      }),
+      createMessage({ id: 'u2', role: 'user', content: '继续', createdAt: 3 }),
+      createMessage({ id: 'a2', role: 'assistant', content: '', createdAt: 4, status: 'streaming' }),
+    ])
+
+    const history = buildAgentMessages(session, 'a2', '').find((message) => message.role === 'system')?.content ?? ''
+
+    expect(history).toContain('工具结果摘要（当时结果）：')
+    expect(history).toContain('已截断')
+    expect(history).not.toContain('结尾')
+  })
+})
+
 function createMemoryStorage(initial: Record<string, string> = {}): StorageLike {
   const data = new Map(Object.entries(initial))
 
@@ -333,5 +447,24 @@ function createMemoryStorage(initial: Record<string, string> = {}): StorageLike 
     removeItem(key) {
       data.delete(key)
     },
+  }
+}
+
+function createSession(messages: ChatMessage[]): ChatSession {
+  return {
+    id: 'session_test',
+    title: '测试会话',
+    createdAt: 1,
+    updatedAt: 1,
+    titleGeneratedTurnCounts: [],
+    messages,
+  }
+}
+
+function createMessage(patch: Partial<ChatMessage> & Pick<ChatMessage, 'id' | 'role' | 'content'>): ChatMessage {
+  return {
+    createdAt: 1,
+    status: 'complete',
+    ...patch,
   }
 }

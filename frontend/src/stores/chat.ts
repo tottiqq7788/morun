@@ -612,26 +612,191 @@ export function buildAgentMessages(
   assistantMessageId: string,
   systemPrompt: string,
 ): AgentMessage[] {
-  const messages = session.messages
-    .filter((message) => message.id !== assistantMessageId)
-    .filter((message) => message.role !== 'tool')
-    .filter((message) => message.content.trim())
-    .map((message) => ({
-      role: message.role,
-      content: message.content,
-    }))
+  const activeMessages = session.messages.filter((message) => message.id !== assistantMessageId)
+  const currentUserIndex = findLastUserMessageIndex(activeMessages)
+  const currentUserMessage = currentUserIndex >= 0 ? activeMessages[currentUserIndex] : null
+  const historicalMessages = currentUserIndex >= 0 ? activeMessages.slice(0, currentUserIndex) : activeMessages
+  const messages: AgentMessage[] = []
 
   if (systemPrompt.trim()) {
-    return [
-      {
-        role: 'system',
-        content: systemPrompt.trim(),
-      },
-      ...messages,
-    ]
+    messages.push({
+      role: 'system',
+      content: systemPrompt.trim(),
+    })
+  }
+
+  messages.push({
+    role: 'system',
+    content: buildConversationHistoryIndex(historicalMessages),
+  })
+
+  if (currentUserMessage?.content.trim()) {
+    messages.push({
+      role: 'user',
+      content: currentUserMessage.content,
+    })
   }
 
   return messages
+}
+
+function buildConversationHistoryIndex(messages: ChatMessage[]) {
+  const turns = groupHistoricalTurns(messages)
+  const maxVisibleTurns = 12
+  const visibleTurns = turns.slice(-maxVisibleTurns)
+  const omittedTurnCount = Math.max(0, turns.length - visibleTurns.length)
+  const lines = [
+    '历史对话索引（强标注）',
+    '规则：',
+    '- 以下历史轮次只代表当时状态，不代表当前状态。',
+    '- 历史工具结果、权限、定位、网络、文件、外部系统状态可能已经变化。',
+    '- 当前用户请求见最后一条 user 消息；需要当前状态时应重新调用相关工具。',
+    '- 如果用户要求重试、再查、现在、已开启权限、重新执行，应优先考虑重新调用相关工具；不调用工具需说明原因。',
+    '- 如果用户只是询问历史原因，可以基于历史记录解释，不需要强制重新调用工具。',
+    '',
+  ]
+
+  if (!visibleTurns.length) {
+    lines.push('历史轮次：无。')
+    return lines.join('\n')
+  }
+
+  if (omittedTurnCount) {
+    lines.push(`已省略更早的 ${omittedTurnCount} 轮历史。`)
+    lines.push('')
+  }
+
+  for (const turn of visibleTurns) {
+    lines.push(...formatHistoricalTurn(turn))
+    lines.push('')
+  }
+
+  return lines.join('\n').trim()
+}
+
+interface HistoricalTurn {
+  turnNumber: number
+  userMessage: ChatMessage | null
+  messages: ChatMessage[]
+  startedAt: number
+}
+
+function groupHistoricalTurns(messages: ChatMessage[]): HistoricalTurn[] {
+  const turns: HistoricalTurn[] = []
+  let current: HistoricalTurn | null = null
+
+  for (const message of messages) {
+    if (message.role === 'user') {
+      current = {
+        turnNumber: turns.length + 1,
+        userMessage: message,
+        messages: [],
+        startedAt: message.createdAt,
+      }
+      turns.push(current)
+      continue
+    }
+
+    if (!current) {
+      current = {
+        turnNumber: turns.length + 1,
+        userMessage: null,
+        messages: [],
+        startedAt: message.createdAt,
+      }
+      turns.push(current)
+    }
+
+    current.messages.push(message)
+  }
+
+  return turns
+}
+
+function formatHistoricalTurn(turn: HistoricalTurn) {
+  const lines = [
+    `第 ${turn.turnNumber} 轮（历史记录，仅代表当时状态，开始时间：${formatTime(turn.startedAt)}）`,
+  ]
+
+  if (turn.userMessage?.content.trim()) {
+    lines.push(`用户问题：${truncateForContext(turn.userMessage.content, 900)}`)
+  } else {
+    lines.push('用户问题：无（历史孤立消息）')
+  }
+
+  for (const message of turn.messages) {
+    if (message.role === 'assistant') {
+      if (message.content.trim()) {
+        lines.push(`助手回复：${truncateForContext(message.content, 900)}`)
+      }
+      if (message.error) {
+        lines.push(`助手错误：${truncateForContext(message.error, 500)}`)
+      }
+      continue
+    }
+
+    if (message.role === 'tool') {
+      lines.push(...formatHistoricalToolMessage(message))
+    }
+  }
+
+  return lines
+}
+
+function formatHistoricalToolMessage(message: ChatMessage) {
+  const lines = [
+    `工具调用：${message.toolName || 'unknown'}`,
+    `工具状态：${toolStatusContextLabel(message.toolStatus)}`,
+    `发生时间：${formatTime(message.createdAt)}`,
+  ]
+
+  if (message.toolArgs !== undefined) {
+    lines.push(`工具参数：${truncateForContext(stringifyForContext(message.toolArgs), 600)}`)
+  }
+  if (message.toolDuration !== undefined) {
+    lines.push(`耗时：${message.toolDuration.toFixed(1)}s`)
+  }
+  if (message.toolError) {
+    lines.push(`工具错误（当时失败）：${truncateForContext(message.toolError, 600)}`)
+  }
+
+  const resultSummary = message.toolResult !== undefined
+    ? stringifyForContext(message.toolResult)
+    : message.content
+  if (resultSummary.trim()) {
+    lines.push(`工具结果摘要（当时结果）：${truncateForContext(resultSummary, 1200)}`)
+  }
+
+  return lines
+}
+
+function toolStatusContextLabel(status: ToolStatus | undefined) {
+  if (status === 'done') return '成功'
+  if (status === 'error') return '失败'
+  if (status === 'running') return '运行中'
+  return '未知'
+}
+
+function findLastUserMessageIndex(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'user' && messages[index].content.trim()) return index
+  }
+  return -1
+}
+
+function stringifyForContext(value: unknown) {
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function truncateForContext(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, maxLength)}...（已截断 ${normalized.length - maxLength} 字符）`
 }
 
 export function trimTrailingSlash(value: string) {

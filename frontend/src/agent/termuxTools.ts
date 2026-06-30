@@ -17,6 +17,7 @@ const deviceStatusActions = ['battery_status', 'audio_info', 'camera_info'] as c
 const clipboardActions = ['get', 'set'] as const
 const notifyActions = ['toast', 'vibrate', 'notification', 'tts_speak'] as const
 const locationProviders = ['gps', 'network', 'passive'] as const
+const locationRequests = ['last', 'once'] as const
 const mediaCaptureActions = ['camera_photo', 'microphone_record'] as const
 const contactActions = ['list'] as const
 const messageActions = ['sms_list'] as const
@@ -116,6 +117,7 @@ export function createTermuxTools(nativeBridge: MorunNativeBridge): ToolDefiniti
             description: '定位动作。',
           },
           provider: enumSchema(locationProviders, '定位 provider，默认 network。'),
+          request: enumSchema(locationRequests, '定位请求模式，默认 last；once 会等待一次新的定位。'),
         },
         ['action'],
       ),
@@ -269,7 +271,9 @@ export function termuxCommandForTool(toolName: TermuxToolName, args: unknown): T
   if (toolName === 'termux_location') {
     const action = parseEnum(record.action, ['get'] as const, 'action')
     const provider = parseEnum(record.provider ?? 'network', locationProviders, 'provider')
-    if (action === 'get') return { command: 'termux-location', args: ['-p', provider], timeoutMs: 30000 }
+    const request = parseEnum(record.request ?? 'last', locationRequests, 'request')
+    const timeoutMs = request === 'last' ? 15000 : provider === 'gps' ? 120000 : 60000
+    if (action === 'get') return { command: 'termux-location', args: ['-p', provider, '-r', request], timeoutMs }
   }
 
   if (toolName === 'termux_media_capture') {

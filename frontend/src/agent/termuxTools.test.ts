@@ -44,6 +44,19 @@ describe('termux tool catalog', () => {
     })
   })
 
+  it('uses last known location by default and longer timeouts for fresh GPS fixes', () => {
+    expect(termuxCommandForTool('termux_location', { action: 'get' })).toMatchObject({
+      command: 'termux-location',
+      args: ['-p', 'network', '-r', 'last'],
+      timeoutMs: 15000,
+    })
+    expect(termuxCommandForTool('termux_location', { action: 'get', provider: 'gps', request: 'once' })).toMatchObject({
+      command: 'termux-location',
+      args: ['-p', 'gps', '-r', 'once'],
+      timeoutMs: 120000,
+    })
+  })
+
   it('adds a media hint for camera photos', () => {
     expect(termuxCommandForTool('termux_media_capture', {
       action: 'camera_photo',

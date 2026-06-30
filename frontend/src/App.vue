@@ -9,6 +9,7 @@ import {
   X,
 } from '@lucide/vue'
 import ChatMainPanel from './components/ChatMainPanel.vue'
+import DebugLogSettingsCard from './components/DebugLogSettingsCard.vue'
 import TavilySearchConfigCard from './components/TavilySearchConfigCard.vue'
 import TermuxEnvironmentCard from './components/TermuxEnvironmentCard.vue'
 import ToolCatalogSection, { type ToolPolicyUpdate } from './components/ToolCatalogSection.vue'
@@ -66,6 +67,13 @@ import {
   withStoredTavilyApiKey,
 } from './stores/tavilyConfig'
 import { renderMarkdown } from './stores/markdown'
+import {
+  clearDebugLogs,
+  getDebugLogInfo,
+  writeDebugLog,
+  type DebugLogEntryInput,
+  type DebugLogInfo,
+} from './stores/debugLog'
 import { rollbackChatTurnToDraft } from './stores/chatTurns'
 import {
   buildSessionTitleMessages,
@@ -111,6 +119,11 @@ interface SwipeGestureState {
   latestY: number
 }
 
+interface StreamDebugState {
+  lastLoggedAt: number
+  lastLoggedLength: number
+}
+
 const chatStore = useChatStore()
 const {
   modelConfig,
@@ -129,6 +142,8 @@ const chatCompletionClient = createChatCompletionClient({ nativeBridge })
 const toolPolicy = ref(loadToolPolicy())
 const tavilyConfig = ref(loadTavilyConfig())
 const tavilyConfigured = computed(() => hasConfiguredTavilyApiKey(tavilyConfig.value))
+const debugLogInfo = ref<DebugLogInfo | null>(null)
+const debugLogBusy = ref(false)
 const toolRegistry = computed(() =>
   createToolRegistry(
     {
@@ -186,6 +201,8 @@ onMounted(async () => {
   if (await migrateTavilyConfigSecret(tavilyConfig.value, nativeBridge)) {
     saveTavilyConfig(tavilyConfig.value)
   }
+
+  void refreshDebugLogInfo()
 })
 
 watch(
@@ -211,6 +228,10 @@ watch(
   },
   { flush: 'post', immediate: true },
 )
+
+watch(configOpen, (open) => {
+  if (open) void refreshDebugLogInfo()
+})
 
 function createSession() {
   chatStore.createSession()
@@ -273,6 +294,35 @@ async function saveTavilyApiKey(apiKey: string) {
 async function clearTavilyApiKey() {
   tavilyConfig.value = await clearStoredTavilyApiKey(tavilyConfig.value, nativeBridge)
   saveTavilyConfig(tavilyConfig.value)
+}
+
+function logDebug(input: DebugLogEntryInput) {
+  void writeDebugLog(input, { nativeBridge }).catch((error) => {
+    console.warn('写入诊断日志失败', error)
+  })
+}
+
+async function refreshDebugLogInfo() {
+  debugLogBusy.value = true
+  try {
+    debugLogInfo.value = await getDebugLogInfo({ nativeBridge })
+  } catch (error) {
+    console.warn('读取诊断日志状态失败', error)
+  } finally {
+    debugLogBusy.value = false
+  }
+}
+
+async function clearDiagnosticLogs() {
+  debugLogBusy.value = true
+  try {
+    await clearDebugLogs({ nativeBridge })
+    debugLogInfo.value = await getDebugLogInfo({ nativeBridge })
+  } catch (error) {
+    console.warn('清除诊断日志失败', error)
+  } finally {
+    debugLogBusy.value = false
+  }
 }
 
 function closeSettings() {
@@ -465,8 +515,30 @@ async function sendMessage() {
   isGenerating.value = true
   scheduleScroll()
 
+  logDebug({
+    category: 'chat',
+    event: 'user_message_submitted',
+    sessionId: session.id,
+    messageId: userMessage.id,
+    data: {
+      content,
+      sessionTitle: session.title,
+      providerId: provider.id,
+      providerName: provider.name,
+      model: account.model,
+      stream: modelConfig.value.stream,
+      toolCount: agentTools.value.length,
+      tools: agentTools.value.map((tool) => tool.name),
+    },
+  })
+
   const controller = new AbortController()
   activeAbortController.value = controller
+  let currentRunId = ''
+  const streamDebugState: StreamDebugState = {
+    lastLoggedAt: 0,
+    lastLoggedLength: 0,
+  }
 
   try {
     await runAgentTurn({
@@ -487,6 +559,12 @@ async function sendMessage() {
       },
       requestToolConfirmation,
       onEvent: (event) => {
+        if (event.type === 'run_started') currentRunId = event.runId
+        logAgentEvent(session, event, {
+          runId: currentRunId,
+          assistantMessageId: assistantMessage.id,
+          streamState: streamDebugState,
+        })
         assistantMessage = handleAgentEvent(session, assistantMessage, event)
       },
     })
@@ -505,9 +583,33 @@ async function sendMessage() {
     if (isAbortError(error)) {
       target.status = target.content ? 'complete' : 'error'
       target.error = target.content ? undefined : '生成已停止。'
+      logDebug({
+        level: 'warn',
+        category: 'agent',
+        event: 'run_aborted_by_user',
+        sessionId: session.id,
+        messageId: target.id,
+        runId: currentRunId || undefined,
+        data: {
+          content: target.content,
+          error: target.error ?? '生成已停止。',
+        },
+      })
     } else {
       target.status = 'error'
       target.error = formatRequestError(error)
+      logDebug({
+        level: 'error',
+        category: 'agent',
+        event: 'run_failed',
+        sessionId: session.id,
+        messageId: target.id,
+        runId: currentRunId || undefined,
+        data: {
+          error: target.error,
+          rawError: error instanceof Error ? error.message : String(error),
+        },
+      })
     }
   } finally {
     session.updatedAt = Date.now()
@@ -515,6 +617,7 @@ async function sendMessage() {
     activeAbortController.value = null
     pendingToolConfirmation.value = null
     scheduleScroll()
+    if (configOpen.value) void refreshDebugLogInfo()
   }
 }
 
@@ -578,6 +681,196 @@ async function generateSessionTitle(
   }
 }
 
+function logAgentEvent(
+  session: ChatSession,
+  event: AgentRunEvent,
+  {
+    runId,
+    assistantMessageId,
+    streamState,
+  }: {
+    runId: string
+    assistantMessageId: string
+    streamState: StreamDebugState
+  },
+) {
+  if (event.type === 'run_started') {
+    logDebug({
+      category: 'agent',
+      event: 'run_started',
+      sessionId: session.id,
+      runId: event.runId,
+      data: {
+        toolCount: agentTools.value.length,
+        tools: agentTools.value.map((tool) => ({
+          name: tool.name,
+          source: tool.source,
+          permission: tool.permission,
+          confirmationPolicy: tool.confirmationPolicy,
+        })),
+      },
+    })
+    return
+  }
+
+  if (event.type === 'assistant_delta') {
+    if (!shouldLogStreamSnapshot(event.accumulatedContent, streamState)) return
+    logDebug({
+      category: 'agent',
+      event: 'assistant_stream_snapshot',
+      sessionId: session.id,
+      messageId: assistantMessageId,
+      runId: runId || undefined,
+      data: {
+        content: event.accumulatedContent,
+        contentLength: event.accumulatedContent.length,
+      },
+    })
+    return
+  }
+
+  if (event.type === 'assistant_message') {
+    logDebug({
+      category: 'chat',
+      event: 'assistant_message',
+      sessionId: session.id,
+      messageId: assistantMessageId,
+      runId: runId || undefined,
+      data: {
+        content: event.content,
+        contentLength: event.content.length,
+      },
+    })
+    return
+  }
+
+  if (event.type === 'tool_started') {
+    logDebug({
+      category: 'tool',
+      event: 'tool_started',
+      sessionId: session.id,
+      runId: runId || undefined,
+      data: toolDebugData(event.toolCall, {
+        toolTitle: toolRegistry.value.getTitle(event.toolCall.name),
+        source: event.tool.source,
+        permission: event.tool.permission,
+        riskLevel: event.tool.riskLevel,
+      }),
+    })
+    return
+  }
+
+  if (event.type === 'tool_confirmation_required') {
+    logDebug({
+      category: 'tool',
+      event: 'tool_confirmation_required',
+      sessionId: session.id,
+      runId: runId || undefined,
+      data: toolDebugData(event.toolCall, {
+        toolTitle: toolRegistry.value.getTitle(event.toolCall.name),
+        source: event.tool.source,
+        permission: event.tool.permission,
+        riskLevel: event.tool.riskLevel,
+      }),
+    })
+    return
+  }
+
+  if (event.type === 'tool_completed') {
+    logDebug({
+      category: 'tool',
+      event: 'tool_completed',
+      sessionId: session.id,
+      runId: runId || undefined,
+      data: toolDebugData(event.toolCall, {
+        toolTitle: toolRegistry.value.getTitle(event.toolCall.name),
+        durationMs: event.durationMs,
+        text: event.output.text,
+        result: event.output.data ?? event.output.text,
+      }),
+    })
+    return
+  }
+
+  if (event.type === 'tool_failed') {
+    logDebug({
+      level: 'error',
+      category: 'tool',
+      event: 'tool_failed',
+      sessionId: session.id,
+      runId: runId || undefined,
+      data: toolDebugData(event.toolCall, {
+        toolTitle: toolRegistry.value.getTitle(event.toolCall.name),
+        durationMs: event.durationMs,
+        error: event.error,
+      }),
+    })
+    return
+  }
+
+  if (event.type === 'fallback_without_tools') {
+    logDebug({
+      level: 'warn',
+      category: 'agent',
+      event: 'fallback_without_tools',
+      sessionId: session.id,
+      runId: runId || undefined,
+      data: {
+        reason: event.reason,
+      },
+    })
+    return
+  }
+
+  if (event.type === 'run_aborted') {
+    logDebug({
+      level: 'warn',
+      category: 'agent',
+      event: 'run_aborted',
+      sessionId: session.id,
+      runId: runId || undefined,
+    })
+    return
+  }
+
+  if (event.type === 'run_completed') {
+    logDebug({
+      category: 'agent',
+      event: 'run_completed',
+      sessionId: session.id,
+      messageId: assistantMessageId,
+      runId: runId || undefined,
+      data: {
+        content: event.content,
+        usedTools: event.usedTools,
+        fellBackWithoutTools: event.fellBackWithoutTools,
+      },
+    })
+  }
+}
+
+function shouldLogStreamSnapshot(content: string, state: StreamDebugState) {
+  const now = Date.now()
+  const shouldLog =
+    !state.lastLoggedAt ||
+    now - state.lastLoggedAt >= 2000 ||
+    content.length - state.lastLoggedLength >= 1000
+
+  if (!shouldLog) return false
+  state.lastLoggedAt = now
+  state.lastLoggedLength = content.length
+  return true
+}
+
+function toolDebugData(toolCall: ToolCall, extra: Record<string, unknown> = {}) {
+  return {
+    toolName: toolCall.name,
+    toolCallId: toolCall.id,
+    arguments: toolCall.arguments,
+    ...extra,
+  }
+}
+
 function handleAgentEvent(session: ChatSession, assistantMessage: ChatMessage, event: AgentRunEvent): ChatMessage {
   if (
     event.type === 'run_started' ||
@@ -638,6 +931,16 @@ function requestToolConfirmation(toolCall: ToolCall, tool: ToolDefinition) {
 function resolveToolConfirmation(decision: ToolConfirmationDecision) {
   const pending = pendingToolConfirmation.value
   if (!pending) return
+
+  logDebug({
+    category: 'tool',
+    event: 'tool_confirmation_resolved',
+    sessionId: activeSession.value?.id,
+    data: toolDebugData(pending.toolCall, {
+      toolTitle: toolRegistry.value.getTitle(pending.tool.name),
+      outcome: typeof decision === 'string' ? decision : decision.outcome,
+    }),
+  })
 
   pending.resolve(decision)
   pendingToolConfirmation.value = null
@@ -781,9 +1084,22 @@ function queueMediaImport(session: ChatSession, message: ChatMessage, source: st
       scheduleScroll()
     })
     .catch((error) => {
+      const formattedError = formatRequestError(error)
       setMediaImportState(normalizedSource, {
         status: 'error',
-        error: formatRequestError(error),
+        error: formattedError,
+      })
+      logDebug({
+        level: 'error',
+        category: 'media',
+        event: 'import_failed',
+        sessionId: session.id,
+        messageId: message.id,
+        data: {
+          source: normalizedSource,
+          error: formattedError,
+          rawError: error instanceof Error ? error.message : String(error),
+        },
       })
     })
     .finally(() => {
@@ -836,6 +1152,16 @@ function hasMessage(session: ChatSession, messageId: string) {
 }
 
 function stopGeneration() {
+  logDebug({
+    level: 'warn',
+    category: 'agent',
+    event: 'stop_requested',
+    sessionId: activeSession.value?.id,
+    data: {
+      hasActiveAbortController: Boolean(activeAbortController.value),
+      hasPendingToolConfirmation: Boolean(pendingToolConfirmation.value),
+    },
+  })
   resolveToolConfirmation('denied')
   activeAbortController.value?.abort()
 }
@@ -1274,6 +1600,13 @@ function handleSwipeLeft() {
               :clear-api-key="clearTavilyApiKey"
             />
           </TermuxEnvironmentCard>
+
+          <DebugLogSettingsCard
+            :info="debugLogInfo"
+            :busy="debugLogBusy"
+            @refresh="refreshDebugLogInfo"
+            @clear="clearDiagnosticLogs"
+          />
 
           <ToolCatalogSection
             :tools="catalogTools"

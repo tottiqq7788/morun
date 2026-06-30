@@ -72,6 +72,20 @@ export interface ImportMediaResult {
   createdAt: number
 }
 
+export interface NativeDebugLogFileInfo {
+  name: string
+  size: number
+  lastModified: number
+}
+
+export interface NativeDebugLogInfo {
+  enabled: boolean
+  directory: string
+  totalBytes: number
+  latestModifiedAt?: number
+  files: NativeDebugLogFileInfo[]
+}
+
 export interface MorunNativePlugin {
   isAvailable(): Promise<NativeAvailability>
   secureGet(options: { key: string }): Promise<{ value: string | null }>
@@ -85,6 +99,10 @@ export interface MorunNativePlugin {
   openTermuxApp(): Promise<{ ok: true }>
   runTermuxCommand(options: TermuxCommandRequest): Promise<TermuxCommandResult>
   importMedia(options: ImportMediaRequest): Promise<ImportMediaResult>
+  appendDebugLog(options: { entry: string }): Promise<{ ok: true }>
+  getDebugLogInfo(): Promise<NativeDebugLogInfo>
+  readDebugLogs(options?: { maxBytes?: number }): Promise<{ content: string }>
+  clearDebugLogs(): Promise<{ ok: true }>
   startChatCompletion(options: NativeChatCompletionRequest): Promise<{ requestId: string }>
   cancelChatCompletion(options: { requestId: string }): Promise<{ ok: true }>
   addListener(
@@ -115,6 +133,10 @@ export interface MorunNativeBridge {
   openTermuxApp(): Promise<boolean>
   runTermuxCommand(options: TermuxCommandRequest): Promise<TermuxCommandResult>
   importMedia(options: ImportMediaRequest): Promise<ImportMediaResult>
+  appendDebugLog?(entry: string): Promise<boolean>
+  getDebugLogInfo?(): Promise<NativeDebugLogInfo | null>
+  readDebugLogs?(maxBytes?: number): Promise<string>
+  clearDebugLogs?(): Promise<boolean>
   startChatCompletion(options: NativeChatCompletionRequest): Promise<{ requestId: string }>
   cancelChatCompletion(requestId: string): Promise<boolean>
   addListener: MorunNativePlugin['addListener']
@@ -254,6 +276,45 @@ export function createMorunNativeBridge(
       }
 
       return plugin.importMedia(options)
+    },
+    async appendDebugLog(entry) {
+      if (!(await platformInfo())) return false
+
+      try {
+        await plugin.appendDebugLog({ entry })
+        return true
+      } catch {
+        return false
+      }
+    },
+    async getDebugLogInfo() {
+      if (!(await platformInfo())) return null
+
+      try {
+        return await plugin.getDebugLogInfo()
+      } catch {
+        return null
+      }
+    },
+    async readDebugLogs(maxBytes) {
+      if (!(await platformInfo())) return ''
+
+      try {
+        const result = await plugin.readDebugLogs(maxBytes ? { maxBytes } : {})
+        return result.content
+      } catch {
+        return ''
+      }
+    },
+    async clearDebugLogs() {
+      if (!(await platformInfo())) return false
+
+      try {
+        await plugin.clearDebugLogs()
+        return true
+      } catch {
+        return false
+      }
     },
     async startChatCompletion(options) {
       if (!(await platformInfo())) {

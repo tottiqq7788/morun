@@ -5,8 +5,10 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.util.Base64;
+import android.util.Log;
 import androidx.security.crypto.EncryptedSharedPreferences;
 import androidx.security.crypto.MasterKey;
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -28,6 +30,8 @@ import java.io.OutputStreamWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
@@ -36,6 +40,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import org.json.JSONObject;
 
 @CapacitorPlugin(
     name = "MorunNative",
@@ -47,6 +52,12 @@ public class MorunNativePlugin extends Plugin {
     private static final String VERSION = "0.5.1";
     private static final String TERMUX_HOME_PREFIX = "/data/data/com.termux/files/home/";
     private static final int MAX_IMAGE_MEDIA_BYTES = 12 * 1024 * 1024;
+    private static final String DEBUG_LOG_TAG = "MorunDebug";
+    private static final String DEBUG_LOG_DIR_NAME = "morun-debug";
+    private static final String DEBUG_LOG_FILE_NAME = "events.jsonl";
+    private static final long DEBUG_LOG_MAX_FILE_BYTES = 5L * 1024L * 1024L;
+    private static final int DEBUG_LOG_MAX_FILES = 10;
+    private static final int DEBUG_LOG_DEFAULT_READ_BYTES = 1024 * 1024;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final Map<String, HttpURLConnection> activeConnections = new ConcurrentHashMap<>();
@@ -167,6 +178,58 @@ public class MorunNativePlugin extends Plugin {
                 call.resolve(importImageMedia(source));
             } catch (Exception error) {
                 call.reject(error.getMessage() == null ? "Media import failed." : error.getMessage(), error);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void appendDebugLog(PluginCall call) {
+        String entry = requireString(call, "entry");
+        if (entry == null) return;
+
+        executor.submit(() -> {
+            try {
+                appendDebugLogLine(entry);
+                resolveOk(call);
+            } catch (Exception error) {
+                call.reject("Debug log write failed.", error);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void getDebugLogInfo(PluginCall call) {
+        executor.submit(() -> {
+            try {
+                call.resolve(buildDebugLogInfo());
+            } catch (Exception error) {
+                call.reject("Debug log info failed.", error);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void readDebugLogs(PluginCall call) {
+        int maxBytes = Math.max(1024, call.getInt("maxBytes", DEBUG_LOG_DEFAULT_READ_BYTES));
+        executor.submit(() -> {
+            try {
+                JSObject result = new JSObject();
+                result.put("content", readDebugLogContent(maxBytes));
+                call.resolve(result);
+            } catch (Exception error) {
+                call.reject("Debug log read failed.", error);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void clearDebugLogs(PluginCall call) {
+        executor.submit(() -> {
+            try {
+                clearDebugLogFiles();
+                resolveOk(call);
+            } catch (Exception error) {
+                call.reject("Debug log clear failed.", error);
             }
         });
     }
@@ -516,6 +579,196 @@ public class MorunNativePlugin extends Plugin {
         String trimmed = line == null ? "" : line.trim();
         if (!trimmed.startsWith("data:")) return null;
         return trimmed.substring(5).trim();
+    }
+
+    private synchronized void appendDebugLogLine(String entry) throws IOException {
+        File dir = getDebugLogDir();
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw new IOException("Unable to create debug log directory.");
+        }
+
+        File current = new File(dir, DEBUG_LOG_FILE_NAME);
+        if (current.exists() && current.length() >= DEBUG_LOG_MAX_FILE_BYTES) {
+            rotateDebugLogs(dir);
+        }
+
+        String line = normalizeDebugLogLine(entry);
+        try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(current, true), StandardCharsets.UTF_8))) {
+            writer.write(line);
+            writer.newLine();
+        }
+
+        Log.i(DEBUG_LOG_TAG, debugLogSummary(line));
+    }
+
+    private JSObject buildDebugLogInfo() throws IOException {
+        File dir = getDebugLogDir();
+        File[] files = listDebugLogFiles(dir);
+        long totalBytes = 0;
+        long latestModifiedAt = 0;
+        JSArray fileItems = new JSArray();
+
+        for (File file : files) {
+            long size = file.length();
+            long lastModified = file.lastModified();
+            totalBytes += size;
+            latestModifiedAt = Math.max(latestModifiedAt, lastModified);
+
+            JSObject item = new JSObject();
+            item.put("name", file.getName());
+            item.put("size", size);
+            item.put("lastModified", lastModified);
+            fileItems.put(item);
+        }
+
+        JSObject result = new JSObject();
+        result.put("enabled", true);
+        result.put("directory", dir.getCanonicalPath());
+        result.put("totalBytes", totalBytes);
+        if (latestModifiedAt > 0) {
+            result.put("latestModifiedAt", latestModifiedAt);
+        }
+        result.put("files", fileItems);
+        return result;
+    }
+
+    private String readDebugLogContent(int maxBytes) throws IOException {
+        File[] files = listDebugLogFilesForReading(getDebugLogDir());
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+
+        for (File file : files) {
+            try (FileInputStream input = new FileInputStream(file)) {
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                    trimDebugLogBuffer(output, maxBytes);
+                }
+            }
+        }
+
+        return output.toString(StandardCharsets.UTF_8.name());
+    }
+
+    private void clearDebugLogFiles() throws IOException {
+        File dir = getDebugLogDir();
+        for (File file : listDebugLogFiles(dir)) {
+            if (file.exists() && !file.delete()) {
+                throw new IOException("Unable to delete debug log file: " + file.getName());
+            }
+        }
+    }
+
+    private File getDebugLogDir() {
+        return new File(getContext().getFilesDir(), DEBUG_LOG_DIR_NAME);
+    }
+
+    private void rotateDebugLogs(File dir) {
+        File oldest = new File(dir, debugLogFileName(DEBUG_LOG_MAX_FILES - 1));
+        if (oldest.exists()) {
+            oldest.delete();
+        }
+
+        for (int index = DEBUG_LOG_MAX_FILES - 2; index >= 1; index -= 1) {
+            File source = new File(dir, debugLogFileName(index));
+            if (source.exists()) {
+                source.renameTo(new File(dir, debugLogFileName(index + 1)));
+            }
+        }
+
+        File current = new File(dir, DEBUG_LOG_FILE_NAME);
+        if (current.exists()) {
+            current.renameTo(new File(dir, debugLogFileName(1)));
+        }
+    }
+
+    private File[] listDebugLogFiles(File dir) {
+        File[] files = dir.listFiles((file, name) -> name.startsWith("events") && name.endsWith(".jsonl"));
+        if (files == null) return new File[] {};
+
+        Arrays.sort(files, Comparator.comparing(File::getName));
+        return files;
+    }
+
+    private File[] listDebugLogFilesForReading(File dir) {
+        File[] files = listDebugLogFiles(dir);
+        Arrays.sort(files, (left, right) -> Integer.compare(debugLogAge(right), debugLogAge(left)));
+        return files;
+    }
+
+    private int debugLogAge(File file) {
+        String name = file.getName();
+        if (DEBUG_LOG_FILE_NAME.equals(name)) return 0;
+        if (!name.startsWith("events.") || !name.endsWith(".jsonl")) return 0;
+
+        try {
+            return Integer.parseInt(name.substring("events.".length(), name.length() - ".jsonl".length()));
+        } catch (NumberFormatException error) {
+            return 0;
+        }
+    }
+
+    private String debugLogFileName(int index) {
+        return "events." + index + ".jsonl";
+    }
+
+    private void trimDebugLogBuffer(ByteArrayOutputStream output, int maxBytes) throws IOException {
+        if (output.size() <= maxBytes) return;
+
+        byte[] bytes = output.toByteArray();
+        output.reset();
+        output.write(bytes, bytes.length - maxBytes, maxBytes);
+    }
+
+    private String normalizeDebugLogLine(String entry) {
+        return entry.trim().replace('\r', ' ').replace('\n', ' ');
+    }
+
+    private String debugLogSummary(String line) {
+        try {
+            JSONObject entry = new JSONObject(line);
+            StringBuilder summary = new StringBuilder();
+            summary
+                .append(entry.optString("level", "info"))
+                .append(' ')
+                .append(entry.optString("category", "app"))
+                .append('.')
+                .append(entry.optString("event", "unknown"));
+
+            String sessionId = entry.optString("sessionId", "");
+            String runId = entry.optString("runId", "");
+            if (!sessionId.isEmpty()) summary.append(" session=").append(shortDebugValue(sessionId));
+            if (!runId.isEmpty()) summary.append(" run=").append(shortDebugValue(runId));
+
+            JSONObject data = entry.optJSONObject("data");
+            if (data != null) {
+                appendSummaryField(summary, data, "toolName", " tool=");
+                appendSummaryField(summary, data, "status", " status=");
+                appendSummaryField(summary, data, "durationMs", " durationMs=");
+                appendSummaryField(summary, data, "error", " error=");
+            }
+
+            return shortDebugValue(summary.toString(), 360);
+        } catch (Exception error) {
+            return shortDebugValue("debug_log malformed_entry", 360);
+        }
+    }
+
+    private void appendSummaryField(StringBuilder summary, JSONObject data, String key, String label) {
+        String value = data.optString(key, "");
+        if (!value.isEmpty()) {
+            summary.append(label).append(shortDebugValue(value));
+        }
+    }
+
+    private String shortDebugValue(String value) {
+        return shortDebugValue(value, 80);
+    }
+
+    private String shortDebugValue(String value, int maxLength) {
+        String normalized = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        if (normalized.length() <= maxLength) return normalized;
+        return normalized.substring(0, maxLength) + "...";
     }
 
     private String readStream(InputStream stream) throws IOException {
